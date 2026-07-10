@@ -1,0 +1,8 @@
+uint8 MODE_IDLE=0
+uint8 MODE_JOINT_PD=1
+uint8 MODE_CARTESIAN_FOOT=2
+uint8 MODE_GRAVITY_COMPENSATION=3
+uint8 MODE_WHOLE_BODY=4
+
+uint8 mode
+string label

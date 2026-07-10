@@ -1,0 +1,40 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>quadruped_bringup</name>
+  <version>0.0.1</version>
+  <description>Launch orchestration for quadruped simulation, control, gait, and state estimation stacks.</description>
+  <maintainer email="dev@example.com">Surivona Robotics</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>controller_manager</exec_depend>
+  <exec_depend>gz_ros2_control</exec_depend>
+  <exec_depend>joint_state_publisher</exec_depend>
+  <exec_depend>joint_state_broadcaster</exec_depend>
+  <exec_depend>position_controllers</exec_depend>
+  <exec_depend>quadruped_control</exec_depend>
+  <exec_depend>quadruped_description</exec_depend>
+  <exec_depend>quadruped_gait</exec_depend>
+  <exec_depend>quadruped_state_estimation</exec_depend>
+  <exec_depend>robot_localization</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>ros_gz_bridge</exec_depend>
+  <exec_depend>ros_gz_sim</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>unitree_go2w_description</exec_depend>
+  <exec_depend>unitree_go2_sim</exec_depend>
+  <exec_depend>velocity_controllers</exec_depend>
+  <exec_depend>xacro</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

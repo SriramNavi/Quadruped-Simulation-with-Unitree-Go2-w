@@ -1,0 +1,8 @@
+std_msgs/Header header
+string gait_name
+bool enabled
+float32 desired_velocity_x
+float32 desired_velocity_y
+float32 desired_yaw_rate
+float32 step_height
+float32 nominal_body_height

@@ -1,0 +1,35 @@
+robot:
+  name: custom_surivona_quad
+  family: custom
+  description: Placeholder configuration for the in-house Surivona quadruped.
+  xacro: generic_quadruped.xacro
+
+body:
+  length: 0.55
+  width: 0.24
+  height: 0.14
+  nominal_height: 0.30
+  mass: 12.0
+
+leg_geometry:
+  hip_offset_x: 0.22
+  hip_offset_y: 0.11
+  hip_offset_z: 0.0
+  abduction_offset: 0.05
+  thigh_length: 0.20
+  calf_length: 0.20
+
+legs:
+  order: [front_left, front_right, rear_left, rear_right]
+  joint_suffixes: [hip_abduction_joint, hip_pitch_joint, knee_pitch_joint]
+  joint_names:
+    front_left: [front_left_hip_abduction_joint, front_left_hip_pitch_joint, front_left_knee_pitch_joint]
+    front_right: [front_right_hip_abduction_joint, front_right_hip_pitch_joint, front_right_knee_pitch_joint]
+    rear_left: [rear_left_hip_abduction_joint, rear_left_hip_pitch_joint, rear_left_knee_pitch_joint]
+    rear_right: [rear_right_hip_abduction_joint, rear_right_hip_pitch_joint, rear_right_knee_pitch_joint]
+
+control:
+  update_rate_hz: 250.0
+  default_kp: 30.0
+  default_kd: 0.8
+  torque_limit_nm: 20.0

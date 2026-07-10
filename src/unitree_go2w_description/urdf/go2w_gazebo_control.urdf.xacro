@@ -1,0 +1,219 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="go2w_description">
+  <xacro:arg name="base_urdf_file" default="$(find-pkg-share unitree_go2w_description)/urdf/go2w_description.urdf"/>
+  <xacro:arg name="controllers_file" default="$(find-pkg-share unitree_go2w_description)/config/go2w_ros2_control.yaml"/>
+
+  <xacro:include filename="$(arg base_urdf_file)"/>
+
+  <ros2_control name="Go2WGazeboSystem" type="system">
+    <hardware>
+      <plugin>gz_ros2_control/GazeboSimSystem</plugin>
+    </hardware>
+
+    <joint name="FL_hip_joint">
+      <command_interface name="position">
+        <param name="min">-1.0472</param>
+        <param name="max">1.0472</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+    </joint>
+    <joint name="FL_thigh_joint">
+      <command_interface name="position">
+        <param name="min">-1.5707963267948966</param>
+        <param name="max">3.4907</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">0.5</param>
+      </state_interface>
+      <state_interface name="velocity">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+    </joint>
+    <joint name="FL_calf_joint">
+      <command_interface name="position">
+        <param name="min">-2.7227</param>
+        <param name="max">-0.83776</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">-1.4</param>
+      </state_interface>
+      <state_interface name="velocity">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+    </joint>
+
+    <joint name="FR_hip_joint">
+      <command_interface name="position">
+        <param name="min">-1.0472</param>
+        <param name="max">1.0472</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+    </joint>
+    <joint name="FR_thigh_joint">
+      <command_interface name="position">
+        <param name="min">-1.5707963267948966</param>
+        <param name="max">3.4907</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">0.5</param>
+      </state_interface>
+      <state_interface name="velocity">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+    </joint>
+    <joint name="FR_calf_joint">
+      <command_interface name="position">
+        <param name="min">-2.7227</param>
+        <param name="max">-0.83776</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">-1.4</param>
+      </state_interface>
+      <state_interface name="velocity">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+    </joint>
+
+    <joint name="RL_hip_joint">
+      <command_interface name="position">
+        <param name="min">-1.0472</param>
+        <param name="max">1.0472</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+    </joint>
+    <joint name="RL_thigh_joint">
+      <command_interface name="position">
+        <param name="min">-0.5236</param>
+        <param name="max">4.5379</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">0.5</param>
+      </state_interface>
+      <state_interface name="velocity">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+    </joint>
+    <joint name="RL_calf_joint">
+      <command_interface name="position">
+        <param name="min">-2.7227</param>
+        <param name="max">-0.83776</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">-1.4</param>
+      </state_interface>
+      <state_interface name="velocity">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+    </joint>
+
+    <joint name="RR_hip_joint">
+      <command_interface name="position">
+        <param name="min">-1.0472</param>
+        <param name="max">1.0472</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+    </joint>
+    <joint name="RR_thigh_joint">
+      <command_interface name="position">
+        <param name="min">-0.5236</param>
+        <param name="max">4.5379</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">0.5</param>
+      </state_interface>
+      <state_interface name="velocity">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+    </joint>
+    <joint name="RR_calf_joint">
+      <command_interface name="position">
+        <param name="min">-2.7227</param>
+        <param name="max">-0.83776</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">-1.4</param>
+      </state_interface>
+      <state_interface name="velocity">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+    </joint>
+
+    <joint name="FL_foot_joint">
+      <command_interface name="velocity">
+        <param name="min">-4.0</param>
+        <param name="max">4.0</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+    </joint>
+    <joint name="FR_foot_joint">
+      <command_interface name="velocity">
+        <param name="min">-4.0</param>
+        <param name="max">4.0</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+    </joint>
+    <joint name="RL_foot_joint">
+      <command_interface name="velocity">
+        <param name="min">-4.0</param>
+        <param name="max">4.0</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+    </joint>
+    <joint name="RR_foot_joint">
+      <command_interface name="velocity">
+        <param name="min">-4.0</param>
+        <param name="max">4.0</param>
+      </command_interface>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+    </joint>
+  </ros2_control>
+
+  <gazebo>
+    <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
+      <parameters>$(arg controllers_file)</parameters>
+      <controller_manager_name>controller_manager</controller_manager_name>
+      <hold_joints>true</hold_joints>
+      <position_proportional_gain>0.1</position_proportional_gain>
+    </plugin>
+  </gazebo>
+</robot>
