@@ -232,6 +232,204 @@ Gazebo Harmonic manual-control spawn:
 ros2 launch quadruped_bringup go2w_reference.launch.py rviz:=false gazebo:=true manual_mode:=true use_reference_controller:=false
 ```
 
+## Go2-W Slope Stability Test World
+
+The dedicated world is stored at
+`src/quadruped_bringup/worlds/go2w_slope_test.sdf` and installed as
+`share/quadruped_bringup/worlds/go2w_slope_test.sdf`. It is the default world for
+`go2w_reference.launch.py`.
+
+All ramps are 5.0 m long, 2.5 m wide, and 0.12 m thick. Each has a flat 2.0 x
+2.5 x 0.12 m top platform with a 0.02 m overlap at the ramp endpoint. Ramp and
+platform contact surfaces use `mu=1.0` and `mu2=1.0`. The visual-only approach
+centre lines have no collision geometry.
+
+| Angle | Lane centre y | Colour |
+| --- | ---: | --- |
+| 15 degrees | -6.0 m | Blue |
+| 30 degrees | -2.0 m | Green |
+| 35 degrees | 2.0 m | Orange |
+| 45 degrees | 6.0 m | Red |
+
+The default spawn pose is `x=-3.0`, `y=-6.0`, `z=0.45`, `yaw=0.0`, aligned
+with the 15-degree lane and facing world +X. Launch the default slope world with:
+
+```bash
+ros2 launch quadruped_bringup go2w_reference.launch.py \
+  rviz:=false gazebo:=true gui:=true \
+  manual_mode:=true use_reference_controller:=false
+```
+
+Select the initial lane with `spawn_y`:
+
+```bash
+# 15 degrees
+ros2 launch quadruped_bringup go2w_reference.launch.py spawn_y:=-6.0 \
+  rviz:=false gazebo:=true gui:=true manual_mode:=true use_reference_controller:=false
+
+# 30 degrees
+ros2 launch quadruped_bringup go2w_reference.launch.py spawn_y:=-2.0 \
+  rviz:=false gazebo:=true gui:=true manual_mode:=true use_reference_controller:=false
+
+# 35 degrees
+ros2 launch quadruped_bringup go2w_reference.launch.py spawn_y:=2.0 \
+  rviz:=false gazebo:=true gui:=true manual_mode:=true use_reference_controller:=false
+
+# 45 degrees
+ros2 launch quadruped_bringup go2w_reference.launch.py spawn_y:=6.0 \
+  rviz:=false gazebo:=true gui:=true manual_mode:=true use_reference_controller:=false
+```
+
+Launch the previous Gazebo Harmonic empty world or a custom absolute SDF path with:
+
+```bash
+ros2 launch quadruped_bringup go2w_reference.launch.py world_file:=empty.sdf \
+  rviz:=false gazebo:=true gui:=true manual_mode:=true use_reference_controller:=false
+
+ros2 launch quadruped_bringup go2w_reference.launch.py \
+  world_file:=/absolute/path/to/custom.sdf \
+  rviz:=false gazebo:=true gui:=true manual_mode:=true use_reference_controller:=false
+```
+
+Validate the installed SDF with:
+
+```bash
+gz sdf -k \
+  "$(ros2 pkg prefix quadruped_bringup)/share/quadruped_bringup/worlds/go2w_slope_test.sdf"
+```
+
+For repeatable manual trials:
+
+1. Start from the same spawn distance.
+2. Align the robot with the ramp centre.
+3. Reset the simulation between trials.
+4. Use the same leg posture.
+5. Use the same acceleration limits.
+6. Use the same commanded approach speed.
+7. Test lower angles before higher angles.
+8. Record whether the robot climbs successfully, wheel-slips, loses heading,
+   touches its body on the ramp, rolls or pitches beyond recovery, or topples.
+9. Repeat each angle several times; one run is not a final stability threshold.
+
+The world remains a simulation-specific comparison. It does not automate motion or
+resets. Results depend on the current Go2-W collision model, controller posture,
+tyre contact model, physics step size, and commanded approach profile. The
+open-ended platforms have no rails and therefore do not prevent a robot from
+falling after reaching the top.
+
+## Quantitative Slope Stability Testing
+
+`go2w_slope_test_monitor` retains a passive measurement mode. With the default
+`auto_drive_enabled:=false`, the operator starts any desired manual command source
+independently and the monitor never publishes motion or emergency-stop commands.
+The monitor launch never starts Gazebo or keyboard teleop.
+
+The monitor reads `/joint_states`, `/cmd_vel`,
+`/go2w_wheel_velocity_controller/commands`, `/go2w/emergency_stop`, optional
+`/imu/data`, and normalized Gazebo ground truth on `/go2w/ground_truth/odom`.
+The monitoring launch bridges the verified Gazebo Harmonic
+`/world/go2w_slope_test/dynamic_pose/info` Pose_V stream to a timestamped
+`PoseArray`; a small adapter selects the verified model pose at index zero, derives
+body-frame velocity using elapsed simulation time, and publishes Odometry. It does
+not publish TF.
+
+Outputs are `/go2w/slope_test/state` (String), `/go2w/slope_test/toppled` (Bool),
+`/go2w/slope_test/orientation_deg` (Vector3Stamped), and
+`/go2w/slope_test/status` (String). A 20 Hz CSV records pose, orientation, measured
+twist, command observations, optional IMU fields, all 16 joints by name, and event
+flags. Missing IMU or effort feedback remains `NaN`. A matching JSON file records
+the terminal result and extrema.
+
+Toppling requires roll, pitch, low-base, or body-up-alignment criteria to persist
+for `topple_hold_sec`; the default high pitch limit does not classify normal steep
+ramp pitch as a fall. Success requires the base to remain upright, within the lane,
+above the platform top and inside its SDF-derived inner x region for
+`success_hold_sec`. The safe region excludes 0.25 m at each platform end.
+Slide-back is reported separately and is not itself a topple result.
+
+Start the simulator without teleop, then start a 15-degree monitoring trial:
+
+```bash
+ros2 launch quadruped_bringup go2w_reference.launch.py \
+  rviz:=false gazebo:=true gui:=true manual_mode:=true
+
+ros2 launch quadruped_bringup go2w_slope_monitor.launch.py \
+  ramp_angle_deg:=15 lane_y:=-6.0 trial_id:=15deg_run01 \
+  target_speed_mps:=0.25
+```
+
+For another world name, override `gazebo_pose_topic` with that world's verified
+`dynamic_pose/info` topic. The helper `./scripts/run_go2w_slope_monitor.sh 30 -2.0
+30deg_run01 0.25` starts only monitoring. CSV and JSON results are written under
+`~/quad_ws/logs/slope_tests` by default. Ctrl+C closes the CSV and records ABORTED
+when no terminal result has already been reached.
+
+Reset the simulation and keep spawn pose, leg posture, controller limits, speed,
+and physics settings identical between trials. Run at least three trials per angle
+and compare the summaries; a single trial does not establish a reliable maximum
+slope. This feature is monitoring and classification only, not active body
+stabilization or posture correction.
+
+## Automated Slope Test Runner
+
+Set `auto_drive_enabled:=true` to make the same monitor own one deterministic
+straight-line trial. Its phases are `INITIALIZING`, `PRECHECK`, `COUNTDOWN`,
+`ACCELERATING`, `CRUISING`, `DECELERATING`, `STOPPING`, and `COMPLETE`; result
+states remain independent (`READY`, `RUNNING`, `WARNING`, `TOPPLING`, `TOPPLED`,
+`SUCCESS`, `TIMEOUT`, or `ABORTED`).
+
+Before clearing emergency stop and beginning the countdown, the runner requires
+fresh odometry and joint states, a `/cmd_vel` consumer, an unasserted emergency
+stop, the configured start position and +X heading, an upright body, and a
+stationary base. A failed precheck holds a zero command and times out without
+moving. `expected_start_y_m` defaults to the selected ramp lane.
+
+The runner publishes only straight `geometry_msgs/msg/Twist` commands on
+`/cmd_vel`; every angular component is zero. Speed increases using
+`acceleration_mps2 * dt` and decreases using `deceleration_mps2 * dt`, where `dt`
+is actual ROS/simulation time. It never publishes wheel-controller commands.
+Deceleration begins at the earlier of the inner platform entry and
+`platform_end_x - stop_distance_before_platform_end_m - v^2/(2a)`. Success is
+declared only after the base is upright and stationary in the success zone for
+`success_hold_sec`.
+
+Topple criteria, timeout, slide-back, lane or heading deviation, stale state data,
+loss of the command consumer, an external emergency stop, Ctrl+C, and internal
+errors force an immediate zero Twist. Emergency failures also publish `true` on
+`/go2w/emergency_stop`; zero and true are repeated through `stop_hold_sec`.
+After a safe precheck the runner publishes `false` once to intentionally clear the
+stop for that trial, and shutdown publishes zero then true. Clear the emergency
+stop intentionally before the next trial.
+
+CSV rows retain the passive fields and add the automation phase, precheck status,
+generated command, freshness, subscriber count, lane/heading errors, abort reason,
+and braking geometry. JSON summaries add the expected/actual start pose, final
+pose, motion profile statistics, result phase, data timeouts, and abort reason.
+Both files are written to `~/quad_ws/logs/slope_tests` unless `log_directory` is
+overridden.
+
+Start Gazebo and the drive converter separately, reset the robot to the configured
+start pose, then run an automated 15-degree trial:
+
+```bash
+ros2 launch quadruped_bringup go2w_slope_monitor.launch.py \
+  ramp_angle_deg:=15 lane_y:=-6.0 trial_id:=15deg_run01 \
+  auto_drive_enabled:=true target_speed_mps:=0.25 \
+  acceleration_mps2:=0.20 deceleration_mps2:=0.35
+```
+
+Passive monitoring remains available with:
+
+```bash
+ros2 launch quadruped_bringup go2w_slope_monitor.launch.py \
+  ramp_angle_deg:=15 lane_y:=-6.0 trial_id:=15deg_passive01 \
+  auto_drive_enabled:=false target_speed_mps:=0.25
+```
+
+**Do not launch keyboard teleop while `auto_drive_enabled` is true. Two
+`/cmd_vel` publishers can conflict.** Reset Gazebo between trials, and run at
+least three trials per angle before drawing conclusions.
+
 Inspect Gazebo controllers:
 
 ```bash
@@ -274,6 +472,24 @@ Runtime inspection:
 ```bash
 ./scripts/inspect_go2w_runtime.sh
 ```
+
+## Effort State Feedback
+
+Effort was previously `.nan` because `gz_ros2_control` exported only position and
+velocity state interfaces. The URDF joint `effort` limits constrain actuators; they
+are not live feedback. The Gazebo control xacro now declares an effort state
+interface for all 12 leg joints and four wheel joints.
+
+Build with `colcon build --symlink-install --packages-select
+unitree_go2w_description quadruped_bringup`. Verify with `ros2 control
+list_hardware_interfaces`, `ros2 topic echo /dynamic_joint_states --once`, and
+`ros2 topic echo /joint_states --once`.
+
+With Gazebo Harmonic and the current `gz_ros2_control` plugin, all 16 effort
+interfaces were exported, all dynamic joint states contained position, velocity,
+and effort, and `/joint_states.effort` contained finite simulated values. These
+values are physics-engine joint feedback and are not validated actuator-torque
+measurements.
 
 ## Current Limitations
 

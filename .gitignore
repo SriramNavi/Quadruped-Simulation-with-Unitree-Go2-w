@@ -3,6 +3,9 @@ build/
 install/
 log/
 
+# Runtime experiment output
+logs/
+
 # Python caches and test artifacts
 __pycache__/
 *.py[cod]

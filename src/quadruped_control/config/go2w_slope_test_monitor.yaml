@@ -1,0 +1,91 @@
+go2w_slope_test_monitor:
+  ros__parameters:
+    # Topics
+    joint_states_topic: /joint_states
+    cmd_vel_topic: /cmd_vel
+    wheel_command_topic: /go2w_wheel_velocity_controller/commands
+    emergency_stop_topic: /go2w/emergency_stop
+    odometry_topic: /go2w/ground_truth/odom
+    imu_topic: /imu/data
+
+    # Trial geometry
+    ramp_angle_deg: 15.0
+    # NaN selects the exact lane in RAMP_GEOMETRY; launch arguments normally override it.
+    lane_y: .nan
+
+    # Logging
+    trial_id: trial_01
+    operator_note: ''
+    log_directory: ~/quad_ws/logs/slope_tests
+    sample_rate_hz: 20.0
+    result_hold_sec: 2.0
+    auto_stop_logging_on_result: true
+
+    # Monitoring and result classification
+    trial_timeout_sec: 60.0
+    warning_roll_deg: 30.0
+    warning_pitch_deg: 45.0
+    topple_roll_deg: 55.0
+    topple_pitch_deg: 65.0
+    minimum_base_height_m: 0.12
+    minimum_body_up_alignment: 0.35
+    topple_hold_sec: 0.25
+    success_hold_sec: 1.0
+    lane_tolerance_m: 1.0
+    slide_back_distance_m: 0.75
+
+    # Automation (passive monitoring remains the default)
+    auto_drive_enabled: false
+    auto_start: true
+    countdown_sec: 3.0
+    shutdown_after_result: false
+    stop_hold_sec: 1.0
+    stop_on_warning: false
+    decelerate_on_platform_entry: true
+
+    # Deterministic motion profile
+    target_speed_mps: 0.25
+    acceleration_mps2: 0.20
+    deceleration_mps2: 0.35
+    emergency_deceleration_mps2: 1.5
+    command_publish_rate_hz: 20.0
+    command_timeout_guard_sec: 0.5
+    stop_distance_before_platform_end_m: 0.50
+    # Straight ramp tests reject any non-zero value.
+    commanded_angular_velocity_radps: 0.0
+
+    # Automated start prechecks
+    require_cmd_vel_subscriber: true
+    require_start_pose: true
+    require_upright_start: true
+    require_stationary_start: true
+    expected_start_x_m: -3.0
+    # NaN derives the expected y-coordinate from the selected ramp lane.
+    expected_start_y_m: .nan
+    expected_start_yaw_deg: 0.0
+    start_position_tolerance_m: 0.35
+    start_yaw_tolerance_deg: 5.0
+    stationary_speed_threshold_mps: 0.03
+    upright_roll_tolerance_deg: 5.0
+    upright_pitch_tolerance_deg: 5.0
+    precheck_timeout_sec: 30.0
+
+    # Runtime safety
+    max_lane_error_before_abort_m: 0.75
+    max_heading_error_before_abort_deg: 15.0
+    odometry_timeout_sec: 0.5
+    joint_states_timeout_sec: 0.5
+    cmd_vel_subscriber_grace_sec: 0.5
+
+# Exact go2w_slope_test.sdf geometry used by the monitor's RAMP_GEOMETRY mapping:
+# angle: lane_y, ramp pose x/z/pitch, platform centre x/z, entry x, top height
+# 15: -6.0, 3.9303437084/0.5890920632/-0.2617993878,
+#     7.3096291314/1.2340952255, 6.3096291314, 1.2940952255
+# 30: -2.0, 3.6950635095/1.1980384758/-0.5235987756,
+#     6.8101270189/2.4400000000, 5.8101270189, 2.5000000000
+# 35:  2.0, 3.5822946969/1.3847919682/-0.6108652382,
+#     6.5757602214/2.8078821818, 5.5757602214, 2.8678821818
+# 45:  6.0, 3.3101933598/1.7253405461/-0.7853981634,
+#     6.0155339059/3.4755339059, 5.0155339059, 3.5355339059
+# Ramps are 5.0 x 2.5 x 0.12 m; platforms are 2.0 x 2.5 x 0.12 m.
+# The success region is the platform length with a 0.25 m margin at both x edges.

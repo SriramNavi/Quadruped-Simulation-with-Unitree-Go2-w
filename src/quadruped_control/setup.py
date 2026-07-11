@@ -30,6 +30,9 @@ setup(
             'go2w_cmd_vel_to_wheels = quadruped_control.go2w_cmd_vel_to_wheels:main',
             'go2w_keyboard_cmd_vel = quadruped_control.go2w_keyboard_cmd_vel:main',
             'go2w_keyboard_teleop = quadruped_control.go2w_keyboard_teleop:main',
+            'go2w_slope_test_monitor = quadruped_control.go2w_slope_test_monitor:main',
+            'go2w_ground_truth_adapter = '
+            'quadruped_control.go2w_slope_test_monitor:ground_truth_adapter_main',
         ],
     },
 )

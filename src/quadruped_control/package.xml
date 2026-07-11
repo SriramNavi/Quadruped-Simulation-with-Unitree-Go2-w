@@ -11,6 +11,7 @@
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
   <exec_depend>quadruped_kinematics</exec_depend>
   <exec_depend>quadruped_msgs</exec_depend>
   <exec_depend>quadruped_utils</exec_depend>

@@ -69,7 +69,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'max_wheel_angular_velocity_radps',
-            default_value='10.0',
+            default_value='20.0',
             description='Maximum wheel angular velocity magnitude in rad/s.',
         ),
         DeclareLaunchArgument(

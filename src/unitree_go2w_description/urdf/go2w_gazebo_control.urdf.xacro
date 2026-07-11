@@ -21,6 +21,7 @@
       <state_interface name="velocity">
         <param name="initial_value">0.0</param>
       </state_interface>
+      <state_interface name="effort"/>
     </joint>
     <joint name="FL_thigh_joint">
       <command_interface name="position">
@@ -33,6 +34,7 @@
       <state_interface name="velocity">
         <param name="initial_value">0.0</param>
       </state_interface>
+      <state_interface name="effort"/>
     </joint>
     <joint name="FL_calf_joint">
       <command_interface name="position">
@@ -45,6 +47,7 @@
       <state_interface name="velocity">
         <param name="initial_value">0.0</param>
       </state_interface>
+      <state_interface name="effort"/>
     </joint>
 
     <joint name="FR_hip_joint">
@@ -58,6 +61,7 @@
       <state_interface name="velocity">
         <param name="initial_value">0.0</param>
       </state_interface>
+      <state_interface name="effort"/>
     </joint>
     <joint name="FR_thigh_joint">
       <command_interface name="position">
@@ -70,6 +74,7 @@
       <state_interface name="velocity">
         <param name="initial_value">0.0</param>
       </state_interface>
+      <state_interface name="effort"/>
     </joint>
     <joint name="FR_calf_joint">
       <command_interface name="position">
@@ -82,6 +87,7 @@
       <state_interface name="velocity">
         <param name="initial_value">0.0</param>
       </state_interface>
+      <state_interface name="effort"/>
     </joint>
 
     <joint name="RL_hip_joint">
@@ -95,6 +101,7 @@
       <state_interface name="velocity">
         <param name="initial_value">0.0</param>
       </state_interface>
+      <state_interface name="effort"/>
     </joint>
     <joint name="RL_thigh_joint">
       <command_interface name="position">
@@ -107,6 +114,7 @@
       <state_interface name="velocity">
         <param name="initial_value">0.0</param>
       </state_interface>
+      <state_interface name="effort"/>
     </joint>
     <joint name="RL_calf_joint">
       <command_interface name="position">
@@ -119,6 +127,7 @@
       <state_interface name="velocity">
         <param name="initial_value">0.0</param>
       </state_interface>
+      <state_interface name="effort"/>
     </joint>
 
     <joint name="RR_hip_joint">
@@ -132,6 +141,7 @@
       <state_interface name="velocity">
         <param name="initial_value">0.0</param>
       </state_interface>
+      <state_interface name="effort"/>
     </joint>
     <joint name="RR_thigh_joint">
       <command_interface name="position">
@@ -144,6 +154,7 @@
       <state_interface name="velocity">
         <param name="initial_value">0.0</param>
       </state_interface>
+      <state_interface name="effort"/>
     </joint>
     <joint name="RR_calf_joint">
       <command_interface name="position">
@@ -156,6 +167,7 @@
       <state_interface name="velocity">
         <param name="initial_value">0.0</param>
       </state_interface>
+      <state_interface name="effort"/>
     </joint>
 
     <joint name="FL_foot_joint">
@@ -169,6 +181,7 @@
       <state_interface name="velocity">
         <param name="initial_value">0.0</param>
       </state_interface>
+      <state_interface name="effort"/>
     </joint>
     <joint name="FR_foot_joint">
       <command_interface name="velocity">
@@ -181,6 +194,7 @@
       <state_interface name="velocity">
         <param name="initial_value">0.0</param>
       </state_interface>
+      <state_interface name="effort"/>
     </joint>
     <joint name="RL_foot_joint">
       <command_interface name="velocity">
@@ -193,6 +207,7 @@
       <state_interface name="velocity">
         <param name="initial_value">0.0</param>
       </state_interface>
+      <state_interface name="effort"/>
     </joint>
     <joint name="RR_foot_joint">
       <command_interface name="velocity">
@@ -205,6 +220,7 @@
       <state_interface name="velocity">
         <param name="initial_value">0.0</param>
       </state_interface>
+      <state_interface name="effort"/>
     </joint>
   </ros2_control>
 

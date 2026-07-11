@@ -11,7 +11,7 @@ go2w_cmd_vel_to_wheels:
     max_linear_velocity_mps: 1.5
     max_reverse_velocity_mps: 1.0
     max_angular_velocity_radps: 1.5
-    max_wheel_angular_velocity_radps: 10.0
+    max_wheel_angular_velocity_radps: 20.0
 
     max_linear_acceleration_mps2: 0.8
     max_linear_deceleration_mps2: 1.2
@@ -50,7 +50,7 @@ go2w_keyboard_cmd_vel:
     # Used only to display the same safe, saturated target as the drive node.
     wheel_radius_m: 0.086
     track_width_m: 0.3802
-    max_wheel_angular_velocity_radps: 10.0
+    max_wheel_angular_velocity_radps: 20.0
     minimum_turning_radius_m: 0.75
     max_angular_velocity_at_zero_speed_radps: 1.0
     max_angular_velocity_at_max_speed_radps: 0.35

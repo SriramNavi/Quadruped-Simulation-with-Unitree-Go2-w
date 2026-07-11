@@ -31,9 +31,11 @@ def package_available(package_name):
 
 
 def generate_launch_description():
+    bringup_share = get_package_share_directory("quadruped_bringup")
     go2w_share = get_package_share_directory("unitree_go2w_description")
     ros_gz_sim_share = get_package_share_directory("ros_gz_sim")
 
+    slope_world_path = os.path.join(bringup_share, "worlds", "go2w_slope_test.sdf")
     urdf_path = os.path.join(go2w_share, "urdf", "go2w_description.urdf")
     control_xacro_path = os.path.join(go2w_share, "urdf", "go2w_gazebo_control.urdf.xacro")
     controllers_path = os.path.join(go2w_share, "config", "go2w_ros2_control.yaml")
@@ -159,14 +161,43 @@ def generate_launch_description():
             default_value="false",
             description="Reserved for future Go2-W reference controllers.",
         ),
-        DeclareLaunchArgument("world", default_value="empty.sdf", description="Gazebo world file."),
+        DeclareLaunchArgument(
+            "world_file",
+            default_value=slope_world_path,
+            description="Gazebo SDF world file; accepts an absolute path.",
+        ),
+        DeclareLaunchArgument(
+            "world",
+            default_value=LaunchConfiguration("world_file"),
+            description="Legacy alias for world_file.",
+        ),
         DeclareLaunchArgument("gui", default_value="true", description="Start Gazebo GUI."),
         DeclareLaunchArgument("use_sim_time", default_value="true", description="Use simulation clock."),
         DeclareLaunchArgument("robot_name", default_value="go2w", description="Spawned model name."),
-        DeclareLaunchArgument("world_init_x", default_value="0.0", description="Initial x position."),
-        DeclareLaunchArgument("world_init_y", default_value="0.0", description="Initial y position."),
-        DeclareLaunchArgument("world_init_z", default_value="0.45", description="Initial z position."),
-        DeclareLaunchArgument("world_init_heading", default_value="0.0", description="Initial yaw."),
+        DeclareLaunchArgument("spawn_x", default_value="-3.0", description="Initial x position."),
+        DeclareLaunchArgument("spawn_y", default_value="-6.0", description="Initial y position."),
+        DeclareLaunchArgument("spawn_z", default_value="0.45", description="Initial z position."),
+        DeclareLaunchArgument("spawn_yaw", default_value="0.0", description="Initial yaw."),
+        DeclareLaunchArgument(
+            "world_init_x",
+            default_value=LaunchConfiguration("spawn_x"),
+            description="Legacy alias for spawn_x.",
+        ),
+        DeclareLaunchArgument(
+            "world_init_y",
+            default_value=LaunchConfiguration("spawn_y"),
+            description="Legacy alias for spawn_y.",
+        ),
+        DeclareLaunchArgument(
+            "world_init_z",
+            default_value=LaunchConfiguration("spawn_z"),
+            description="Legacy alias for spawn_z.",
+        ),
+        DeclareLaunchArgument(
+            "world_init_heading",
+            default_value=LaunchConfiguration("spawn_yaw"),
+            description="Legacy alias for spawn_yaw.",
+        ),
         LogInfo(msg="Go2-W reference launch: Gazebo manual mode starts controllers but no motion commands."),
         SetEnvironmentVariable(
             name="GZ_SIM_RESOURCE_PATH",
