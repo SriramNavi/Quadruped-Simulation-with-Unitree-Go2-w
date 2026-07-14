@@ -104,6 +104,22 @@ COMMAND_STATES = {
 }
 
 
+class MotionRecoveryRunLogger(DynamicRunLogger):
+    """Extend the unchanged run logger schema with motion recovery state."""
+
+    BASE_FIELDS = (
+        *DynamicRunLogger.BASE_FIELDS,
+        'motion_paused',
+        'motion_full_slope_recovered',
+        'motion_recovery_floor_mps',
+        'motion_mixed_contact_escape_active',
+        'motion_mixed_contact_escape_speed_mps',
+        'motion_mixed_contact_escape_elapsed_sec',
+        'motion_mixed_contact_escape_margin_m',
+        'motion_mixed_contact_escape_reason',
+    )
+
+
 def clamp(value: float, lower: float, upper: float) -> float:
     """Clamp a scalar to inclusive bounds."""
     return max(lower, min(upper, value))
@@ -243,7 +259,7 @@ class Go2WDynamicImuIkClimb(Node):
             self.node_start_wall_sec + self.pose_bridge_start_delay_sec
         )
 
-        self.logger = DynamicRunLogger(
+        self.logger = MotionRecoveryRunLogger(
             RunLoggerConfig(
                 output_directory=self.output_directory,
                 run_id=self.run_id,
@@ -258,6 +274,8 @@ class Go2WDynamicImuIkClimb(Node):
         self.last_status_wall_sec = 0.0
         self.last_contact_phase = self.terrain.contact_phase
         self.last_stability_state = self.stability.state
+        self.last_escape_active = False
+        self.last_escape_reason = ''
         steady_clock = Clock(clock_type=ClockType.STEADY_TIME)
         self.control_timer = self.create_timer(
             1.0 / self.control_rate_hz,
@@ -354,6 +372,10 @@ class Go2WDynamicImuIkClimb(Node):
             'entry_speed_scale': 0.45,
             'crest_speed_scale': 0.40,
             'minimum_speed_scale': 0.25,
+            'full_slope_speed_scale': 0.80,
+            'full_slope_recovery_hold_sec': 0.50,
+            'full_slope_pitch_error_limit_deg': 3.0,
+            'full_slope_workspace_limit': 0.90,
             'slope_speed_gain': 0.018,
             'pitch_error_speed_gain': 0.10,
             'workspace_speed_gain': 0.35,
@@ -369,6 +391,16 @@ class Go2WDynamicImuIkClimb(Node):
             'slip_hold_sec': 0.40,
             'infeasible_hold_sec': 1.50,
             'slip_epsilon_mps': 0.025,
+            'mixed_contact_escape_enabled': True,
+            'mixed_contact_escape_speed_mps': 0.012,
+            'mixed_contact_escape_margin_min_m': 0.005,
+            'mixed_contact_escape_margin_max_m': 0.015,
+            'mixed_contact_escape_workspace_limit': 0.90,
+            'mixed_contact_escape_pitch_error_limit_deg': 18.0,
+            'mixed_contact_escape_max_duration_sec': 2.0,
+            'mixed_contact_escape_rearm_sec': 0.50,
+            'mixed_contact_escape_progress_timeout_sec': 0.75,
+            'mixed_contact_escape_min_progress_m': 0.003,
             'output_directory': '/home/svm/quad_ws/logs/dynamic_imu_ik',
             'run_id': '',
             'shutdown_after_top': False,
@@ -410,6 +442,7 @@ class Go2WDynamicImuIkClimb(Node):
             'terrain_feedforward_enabled', 'roll_control_enabled',
             'allow_nonlevel_start', 'heading_hold_enabled',
             'shutdown_after_top', 'manage_pose_bridge',
+            'mixed_contact_escape_enabled',
         }
         integers = {
             'max_consecutive_ik_failures',
@@ -421,7 +454,9 @@ class Go2WDynamicImuIkClimb(Node):
             if name in strings:
                 value: Any = str(parameter.value)
             elif name in booleans:
-                value = bool(parameter.value)
+                if type(parameter.value) is not bool:
+                    raise ValueError(f'{name} must be bool')
+                value = parameter.value
             elif name in integers:
                 value = int(parameter.value)
             else:
@@ -441,6 +476,70 @@ class Go2WDynamicImuIkClimb(Node):
             )
         if not 0.0 < self.commanded_speed_mps <= 2.0:
             raise ValueError('commanded_speed_mps must be in (0, 2]')
+        if not 0.0 <= self.full_slope_speed_scale <= 1.0:
+            raise ValueError('full_slope_speed_scale must be in [0, 1]')
+        if self.full_slope_recovery_hold_sec < 0.0:
+            raise ValueError(
+                'full_slope_recovery_hold_sec must be non-negative'
+            )
+        if self.full_slope_pitch_error_limit_deg <= 0.0:
+            raise ValueError(
+                'full_slope_pitch_error_limit_deg must be greater than zero'
+            )
+        if not 0.0 < self.full_slope_workspace_limit <= 1.0:
+            raise ValueError('full_slope_workspace_limit must be in (0, 1]')
+        if type(self.mixed_contact_escape_enabled) is not bool:
+            raise ValueError('mixed_contact_escape_enabled must be bool')
+        if self.mixed_contact_escape_speed_mps <= 0.0:
+            raise ValueError(
+                'mixed_contact_escape_speed_mps must be greater than zero'
+            )
+        if self.mixed_contact_escape_speed_mps > self.commanded_speed_mps:
+            raise ValueError(
+                'mixed_contact_escape_speed_mps must not exceed '
+                'commanded_speed_mps'
+            )
+        if self.mixed_contact_escape_margin_min_m < 0.0:
+            raise ValueError(
+                'mixed_contact_escape_margin_min_m must be non-negative'
+            )
+        if (
+            self.mixed_contact_escape_margin_max_m
+            <= self.mixed_contact_escape_margin_min_m
+        ):
+            raise ValueError('invalid mixed-contact escape margin band')
+        if (
+            self.mixed_contact_escape_margin_max_m
+            > self.stability_stop_margin_m
+        ):
+            raise ValueError(
+                'mixed_contact_escape_margin_max_m must not exceed '
+                'stability_stop_margin_m'
+            )
+        if not 0.0 < self.mixed_contact_escape_workspace_limit <= 1.0:
+            raise ValueError(
+                'mixed_contact_escape_workspace_limit must be in (0, 1]'
+            )
+        if self.mixed_contact_escape_pitch_error_limit_deg <= 0.0:
+            raise ValueError(
+                'mixed_contact_escape_pitch_error_limit_deg must be positive'
+            )
+        if self.mixed_contact_escape_max_duration_sec <= 0.0:
+            raise ValueError(
+                'mixed_contact_escape_max_duration_sec must be positive'
+            )
+        if self.mixed_contact_escape_rearm_sec < 0.0:
+            raise ValueError(
+                'mixed_contact_escape_rearm_sec must be non-negative'
+            )
+        if self.mixed_contact_escape_progress_timeout_sec <= 0.0:
+            raise ValueError(
+                'mixed_contact_escape_progress_timeout_sec must be positive'
+            )
+        if self.mixed_contact_escape_min_progress_m < 0.0:
+            raise ValueError(
+                'mixed_contact_escape_min_progress_m must be non-negative'
+            )
         if not 20.0 <= self.control_rate_hz <= 250.0:
             raise ValueError('control_rate_hz must be in [20, 250]')
         if self.pitch_filter_cutoff_hz >= 0.45 * self.control_rate_hz:
@@ -559,6 +658,12 @@ class Go2WDynamicImuIkClimb(Node):
             entry_speed_scale=self.entry_speed_scale,
             crest_speed_scale=self.crest_speed_scale,
             minimum_speed_scale=self.minimum_speed_scale,
+            full_slope_speed_scale=self.full_slope_speed_scale,
+            full_slope_recovery_hold_sec=self.full_slope_recovery_hold_sec,
+            full_slope_pitch_error_limit_deg=(
+                self.full_slope_pitch_error_limit_deg
+            ),
+            full_slope_workspace_limit=self.full_slope_workspace_limit,
             slope_speed_gain=self.slope_speed_gain,
             pitch_error_speed_gain=self.pitch_error_speed_gain,
             workspace_speed_gain=self.workspace_speed_gain,
@@ -567,6 +672,36 @@ class Go2WDynamicImuIkClimb(Node):
             slip_caution_threshold=self.slip_caution_threshold,
             slip_stop_threshold=self.slip_stop_threshold,
             safe_pause_hold_sec=self.safe_pause_hold_sec,
+            mixed_contact_escape_enabled=(
+                self.mixed_contact_escape_enabled
+            ),
+            mixed_contact_escape_speed_mps=(
+                self.mixed_contact_escape_speed_mps
+            ),
+            mixed_contact_escape_margin_min_m=(
+                self.mixed_contact_escape_margin_min_m
+            ),
+            mixed_contact_escape_margin_max_m=(
+                self.mixed_contact_escape_margin_max_m
+            ),
+            mixed_contact_escape_workspace_limit=(
+                self.mixed_contact_escape_workspace_limit
+            ),
+            mixed_contact_escape_pitch_error_limit_deg=(
+                self.mixed_contact_escape_pitch_error_limit_deg
+            ),
+            mixed_contact_escape_max_duration_sec=(
+                self.mixed_contact_escape_max_duration_sec
+            ),
+            mixed_contact_escape_rearm_sec=(
+                self.mixed_contact_escape_rearm_sec
+            ),
+            mixed_contact_escape_progress_timeout_sec=(
+                self.mixed_contact_escape_progress_timeout_sec
+            ),
+            mixed_contact_escape_min_progress_m=(
+                self.mixed_contact_escape_min_progress_m
+            ),
         ))
 
     def _create_ros_interfaces(self) -> None:
@@ -643,6 +778,16 @@ class Go2WDynamicImuIkClimb(Node):
             'stability_scale': 'motion/stability_scale',
             'traction_scale': 'motion/traction_scale',
             'workspace_scale': 'motion/workspace_scale',
+            'recovery_floor': 'motion/recovery_floor_mps',
+            'mixed_contact_escape_speed': (
+                'motion/mixed_contact_escape_speed_mps'
+            ),
+            'mixed_contact_escape_elapsed': (
+                'motion/mixed_contact_escape_elapsed_sec'
+            ),
+            'mixed_contact_escape_margin': (
+                'motion/mixed_contact_escape_margin_m'
+            ),
         }
         self.float_publishers = {
             key: self.create_publisher(Float64, f'{prefix}/{topic}', 10)
@@ -655,6 +800,11 @@ class Go2WDynamicImuIkClimb(Node):
             'saturated': 'saturated',
             'workspace_limited': 'workspace_limited',
             'enabled': 'enabled',
+            'motion_paused': 'motion/paused',
+            'full_slope_recovered': 'motion/full_slope_recovered',
+            'mixed_contact_escape_active': (
+                'motion/mixed_contact_escape_active'
+            ),
         }
         self.bool_publishers = {
             key: self.create_publisher(Bool, f'{prefix}/{topic}', 10)
@@ -669,6 +819,9 @@ class Go2WDynamicImuIkClimb(Node):
             'traction_state': 'traction/state',
             'safe_stop_reason': 'safe_stop_reason',
             'infeasible_reason': 'infeasible_reason',
+            'mixed_contact_escape_reason': (
+                'motion/mixed_contact_escape_reason'
+            ),
         }
         self.string_publishers = {
             key: self.create_publisher(String, f'{prefix}/{topic}', 10)
@@ -1349,13 +1502,19 @@ class Go2WDynamicImuIkClimb(Node):
             self.stability_stop_since = None
             self.workspace_exhausted_since = None
             return
+        escape_reason = self.motion_supervisor.mixed_contact_escape_reason
+        if escape_reason.startswith('ESCAPE_ABORT_'):
+            self._enter_infeasible(now_ros, escape_reason)
+            return
         if self.traction.state == SafetyState.INFEASIBLE:
             self._enter_infeasible(now_ros, 'INFEASIBLE_TRACTION')
             return
         if self.stability.state == SafetyState.INFEASIBLE:
             self._enter_infeasible(now_ros, 'INFEASIBLE_STABILITY')
             return
-        if self.stability.state == SafetyState.STOP:
+        if self.motion_supervisor.mixed_contact_escape_active:
+            self.stability_stop_since = None
+        elif self.stability.state == SafetyState.STOP:
             self.stability_stop_since = self.stability_stop_since or now_ros
             if now_ros - self.stability_stop_since >= self.infeasible_hold_sec:
                 self._enter_infeasible(now_ros, 'INFEASIBLE_STABILITY_MARGIN')
@@ -1458,7 +1617,11 @@ class Go2WDynamicImuIkClimb(Node):
                     self._enter_fault(
                         now_ros, 'repeated analytical IK failures',
                     )
-        drive_enabled = self.state in DRIVE_STATES and self.pose_valid
+        drive_enabled = (
+            self.state in DRIVE_STATES
+            and self.pose_valid
+            and self.joint_command.valid
+        )
         self.motion_command = self.motion_supervisor.update(
             now_ros, dt, self.terrain,
             self.attitude_command.pitch_error_deg,
@@ -1470,6 +1633,34 @@ class Go2WDynamicImuIkClimb(Node):
             self.infeasible_reason or self.fault_reason
             or self.motion_command.stop_reason
         )
+
+    def _log_escape_transition(self) -> None:
+        """Log each mixed-contact escape transition exactly once."""
+        active = self.motion_supervisor.mixed_contact_escape_active
+        reason = self.motion_supervisor.mixed_contact_escape_reason
+        if active and not self.last_escape_active:
+            escape_speed = min(
+                self.mixed_contact_escape_speed_mps,
+                self.commanded_speed_mps,
+            )
+            self.get_logger().warning(
+                'mixed-contact escape activated: '
+                f'margin={self.stability.minimum_margin_m:.6f} m '
+                f'speed={escape_speed:.3f} m/s'
+            )
+        elif not active and self.last_escape_active:
+            if reason.startswith('ESCAPE_SUCCESS_'):
+                self.get_logger().info(
+                    f'mixed-contact escape succeeded: {reason}'
+                )
+            elif reason.startswith('ESCAPE_ABORT_'):
+                self.get_logger().warning(
+                    f'mixed-contact escape aborted: {reason}'
+                )
+        elif reason == 'ESCAPE_REARMED' and reason != self.last_escape_reason:
+            self.get_logger().info('mixed-contact escape rearmed')
+        self.last_escape_active = active
+        self.last_escape_reason = reason
 
     def _publish_actuators(self) -> None:
         if (
@@ -1555,6 +1746,22 @@ class Go2WDynamicImuIkClimb(Node):
             'stability_scale': motion.stability_scale,
             'traction_scale': motion.traction_scale,
             'workspace_scale': motion.workspace_scale,
+            'recovery_floor': (
+                motion.requested_speed_mps * self.full_slope_speed_scale
+                if self.motion_supervisor.full_slope_recovered else 0.0
+            ),
+            'mixed_contact_escape_speed': (
+                min(
+                    self.mixed_contact_escape_speed_mps,
+                    self.commanded_speed_mps,
+                )
+                if self.motion_supervisor.mixed_contact_escape_active
+                else 0.0
+            ),
+            'mixed_contact_escape_elapsed': (
+                self.motion_supervisor.mixed_contact_escape_elapsed_sec
+            ),
+            'mixed_contact_escape_margin': stability.minimum_margin_m,
         }
         for key, value in floats.items():
             if math.isfinite(value):
@@ -1571,6 +1778,13 @@ class Go2WDynamicImuIkClimb(Node):
                 self.mode == ControllerMode.ACTIVE
                 and self.state in COMMAND_STATES
             ),
+            'motion_paused': motion.paused,
+            'full_slope_recovered': (
+                self.motion_supervisor.full_slope_recovered
+            ),
+            'mixed_contact_escape_active': (
+                self.motion_supervisor.mixed_contact_escape_active
+            ),
         }
         for key, value in bools.items():
             message = Bool()
@@ -1585,6 +1799,9 @@ class Go2WDynamicImuIkClimb(Node):
             'traction_state': traction.state.value,
             'safe_stop_reason': self.safe_stop_reason,
             'infeasible_reason': self.infeasible_reason,
+            'mixed_contact_escape_reason': (
+                self.motion_supervisor.mixed_contact_escape_reason
+            ),
         }
         for key, value in strings.items():
             message = String()
@@ -1724,6 +1941,35 @@ class Go2WDynamicImuIkClimb(Node):
             'stability_scale': motion.stability_scale,
             'traction_scale': motion.traction_scale,
             'workspace_scale': motion.workspace_scale,
+            'motion_paused': motion.paused,
+            'motion_full_slope_recovered': (
+                self.motion_supervisor.full_slope_recovered
+            ),
+            'motion_recovery_floor_mps': (
+                motion.requested_speed_mps * self.full_slope_speed_scale
+                if self.motion_supervisor.full_slope_recovered else 0.0
+            ),
+            'motion_mixed_contact_escape_active': (
+                self.motion_supervisor.mixed_contact_escape_active
+            ),
+            'motion_mixed_contact_escape_speed_mps': (
+                min(
+                    self.mixed_contact_escape_speed_mps,
+                    self.commanded_speed_mps,
+                )
+                if self.motion_supervisor.mixed_contact_escape_active
+                else 0.0
+            ),
+            'motion_mixed_contact_escape_elapsed_sec': (
+                self.motion_supervisor.mixed_contact_escape_elapsed_sec
+            ),
+            'motion_mixed_contact_escape_margin_m': (
+                stability.minimum_margin_m
+                if math.isfinite(stability.minimum_margin_m) else ''
+            ),
+            'motion_mixed_contact_escape_reason': (
+                self.motion_supervisor.mixed_contact_escape_reason
+            ),
             'ik_valid': joint.valid,
             'saturated': attitude.saturated,
             'workspace_limited': feasibility.workspace_usage >= 0.95,
@@ -1817,6 +2063,9 @@ class Go2WDynamicImuIkClimb(Node):
         if now_wall - self.last_status_wall_sec < 1.0:
             return
         self.last_status_wall_sec = now_wall
+        escape_active = str(
+            self.motion_supervisor.mixed_contact_escape_active
+        ).lower()
         self.get_logger().info(
             f'status state={self.state.value} '
             f'phase={self.terrain.contact_phase.value} '
@@ -1828,7 +2077,15 @@ class Go2WDynamicImuIkClimb(Node):
             f'slope={self.terrain.stable_slope_deg:.3f} deg '
             f'margin={self.stability.minimum_margin_m:.3f} m '
             f'slip={self.traction.average_abs_slip:.3f} '
-            f'speed={self.motion_command.effective_speed_mps:.3f} m/s'
+            f'speed={self.motion_command.effective_speed_mps:.3f} m/s '
+            f'paused={str(self.motion_command.paused).lower()} '
+            'recovered='
+            f'{str(self.motion_supervisor.full_slope_recovered).lower()} '
+            'escape='
+            f'{escape_active} '
+            f'escape_margin={self.stability.minimum_margin_m:.6f} '
+            'escape_elapsed='
+            f'{self.motion_supervisor.mixed_contact_escape_elapsed_sec:.3f}'
         )
 
     def _ros_now_sec(self) -> float:
@@ -1893,6 +2150,7 @@ class Go2WDynamicImuIkClimb(Node):
                     self.stability, self.traction, self.feasibility,
                     0.0, self.base_yaw_rate, False,
                 )
+        self._log_escape_transition()
         self._publish_actuators()
         self._publish_monitoring()
         self._log_cycle(now_ros, now_wall)

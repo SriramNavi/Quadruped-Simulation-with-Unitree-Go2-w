@@ -42,6 +42,10 @@ class MotionSupervisorConfig:
     entry_speed_scale: float = 0.45
     crest_speed_scale: float = 0.40
     minimum_speed_scale: float = 0.25
+    full_slope_speed_scale: float = 0.80
+    full_slope_recovery_hold_sec: float = 0.50
+    full_slope_pitch_error_limit_deg: float = 3.0
+    full_slope_workspace_limit: float = 0.90
     slope_speed_gain: float = 0.018
     pitch_error_speed_gain: float = 0.10
     workspace_speed_gain: float = 0.35
@@ -50,24 +54,104 @@ class MotionSupervisorConfig:
     slip_caution_threshold: float = 0.30
     slip_stop_threshold: float = 0.55
     safe_pause_hold_sec: float = 0.35
+    mixed_contact_escape_enabled: bool = True
+    mixed_contact_escape_speed_mps: float = 0.012
+    mixed_contact_escape_margin_min_m: float = 0.005
+    mixed_contact_escape_margin_max_m: float = 0.015
+    mixed_contact_escape_workspace_limit: float = 0.90
+    mixed_contact_escape_pitch_error_limit_deg: float = 18.0
+    mixed_contact_escape_max_duration_sec: float = 2.0
+    mixed_contact_escape_rearm_sec: float = 0.50
+    mixed_contact_escape_progress_timeout_sec: float = 0.75
+    mixed_contact_escape_min_progress_m: float = 0.003
 
     def validate(self) -> None:
         """Reject invalid scheduler gains, scales, or thresholds."""
-        values = tuple(self.__dict__.values())
-        if not all(math.isfinite(value) and value >= 0.0 for value in values):
+        if type(self.mixed_contact_escape_enabled) is not bool:
+            raise ValueError('mixed-contact escape enabled must be bool')
+        values = tuple(
+            value for name, value in self.__dict__.items()
+            if name != 'mixed_contact_escape_enabled'
+        )
+        if not all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and value >= 0.0
+            for value in values
+        ):
             raise ValueError(
                 'motion configuration must be finite and non-negative'
             )
         for value in (
             self.entry_speed_scale, self.crest_speed_scale,
-            self.minimum_speed_scale,
+            self.minimum_speed_scale, self.full_slope_speed_scale,
         ):
             if value > 1.0:
                 raise ValueError('motion scales must be in [0, 1]')
+        if self.full_slope_pitch_error_limit_deg <= 0.0:
+            raise ValueError(
+                'full-slope pitch error limit must be greater than zero'
+            )
+        if not 0.0 < self.full_slope_workspace_limit <= 1.0:
+            raise ValueError('full-slope workspace limit must be in (0, 1]')
         if self.stability_caution_margin_m <= self.stability_stop_margin_m:
             raise ValueError('invalid stability scaling margins')
         if self.slip_stop_threshold <= self.slip_caution_threshold:
             raise ValueError('invalid traction scaling thresholds')
+        if self.mixed_contact_escape_speed_mps <= 0.0:
+            raise ValueError(
+                'mixed-contact escape speed must be greater than zero'
+            )
+        if (
+            self.requested_speed_mps <= 0.0
+            or self.mixed_contact_escape_speed_mps
+            > self.requested_speed_mps
+        ):
+            raise ValueError(
+                'mixed-contact escape speed must not exceed requested speed'
+            )
+        if self.mixed_contact_escape_margin_min_m < 0.0:
+            raise ValueError(
+                'mixed-contact escape minimum margin must be non-negative'
+            )
+        if (
+            self.mixed_contact_escape_margin_max_m
+            <= self.mixed_contact_escape_margin_min_m
+        ):
+            raise ValueError('invalid mixed-contact escape margin band')
+        if (
+            self.mixed_contact_escape_margin_max_m
+            > self.stability_stop_margin_m
+        ):
+            raise ValueError(
+                'mixed-contact escape maximum margin must not exceed '
+                'stability stop margin'
+            )
+        if not 0.0 < self.mixed_contact_escape_workspace_limit <= 1.0:
+            raise ValueError(
+                'mixed-contact escape workspace limit must be in (0, 1]'
+            )
+        if self.mixed_contact_escape_pitch_error_limit_deg <= 0.0:
+            raise ValueError(
+                'mixed-contact escape pitch error limit must be positive'
+            )
+        if self.mixed_contact_escape_max_duration_sec <= 0.0:
+            raise ValueError(
+                'mixed-contact escape maximum duration must be positive'
+            )
+        if self.mixed_contact_escape_rearm_sec < 0.0:
+            raise ValueError(
+                'mixed-contact escape rearm duration must be non-negative'
+            )
+        if self.mixed_contact_escape_progress_timeout_sec <= 0.0:
+            raise ValueError(
+                'mixed-contact escape progress timeout must be positive'
+            )
+        if self.mixed_contact_escape_min_progress_m < 0.0:
+            raise ValueError(
+                'mixed-contact escape minimum progress must be non-negative'
+            )
 
 
 class MotionSupervisor:
@@ -83,6 +167,10 @@ class MotionSupervisor:
         ContactPhase.FRONT_AXLE_ON_TOP,
         ContactPhase.MIXED_CONTACT_EXIT,
     }
+    _MIXED_CONTACT_ESCAPE_PHASES = {
+        ContactPhase.FRONT_AXLE_ON_RAMP,
+        ContactPhase.MIXED_CONTACT_ENTRY,
+    }
 
     def __init__(self, config: MotionSupervisorConfig) -> None:
         """Initialize speed, pause, and wheel-command state."""
@@ -92,6 +180,15 @@ class MotionSupervisor:
         self._wheel_linear = [0.0] * 4
         self._safe_since: float | None = None
         self._paused = False
+        self._full_slope_safe_since: float | None = None
+        self._full_slope_recovered = False
+        self._escape_active = False
+        self._escape_start_sec: float | None = None
+        self._escape_start_progress_m: float | None = None
+        self._escape_last_progress_sec: float | None = None
+        self._escape_rearm_until_sec: float | None = None
+        self._escape_reason = ''
+        self._last_update_sec: float | None = None
 
     def reset(self) -> None:
         """Clear speed and pause history at a run boundary."""
@@ -99,6 +196,58 @@ class MotionSupervisor:
         self._wheel_linear = [0.0] * 4
         self._safe_since = None
         self._paused = False
+        self._full_slope_safe_since = None
+        self._full_slope_recovered = False
+        self._escape_active = False
+        self._escape_start_sec = None
+        self._escape_start_progress_m = None
+        self._escape_last_progress_sec = None
+        self._escape_rearm_until_sec = None
+        self._escape_reason = ''
+        self._last_update_sec = None
+
+    @property
+    def full_slope_recovered(self) -> bool:
+        """Report whether sustained healthy full-slope recovery is active."""
+        return self._full_slope_recovered
+
+    @property
+    def mixed_contact_escape_active(self) -> bool:
+        """Report whether the bounded mixed-contact crawl is active."""
+        return self._escape_active
+
+    @property
+    def mixed_contact_escape_elapsed_sec(self) -> float:
+        """Report elapsed time for the current escape attempt."""
+        if (
+            not self._escape_active
+            or self._escape_start_sec is None
+            or self._last_update_sec is None
+        ):
+            return 0.0
+        return max(0.0, self._last_update_sec - self._escape_start_sec)
+
+    @property
+    def mixed_contact_escape_reason(self) -> str:
+        """Report the latest escape transition reason."""
+        return self._escape_reason
+
+    def _clear_escape_timing(self) -> None:
+        """Clear timing and progress checkpoints for an inactive escape."""
+        self._escape_start_sec = None
+        self._escape_start_progress_m = None
+        self._escape_last_progress_sec = None
+
+    def _abort_escape(self, now_sec: float, reason: str) -> None:
+        """Latch a bounded escape failure into the ordinary safe pause."""
+        self._escape_active = False
+        self._clear_escape_timing()
+        self._escape_rearm_until_sec = (
+            now_sec + self.config.mixed_contact_escape_rearm_sec
+        )
+        self._escape_reason = reason
+        self._paused = True
+        self._safe_since = None
 
     def update(
         self,
@@ -115,6 +264,175 @@ class MotionSupervisor:
     ) -> MotionCommand:
         """Schedule and rate-limit one safe non-reversing wheel command."""
         cfg = self.config
+        previous_update_sec = self._last_update_sec
+        time_valid = (
+            math.isfinite(now_sec)
+            and math.isfinite(dt_sec)
+            and dt_sec >= 0.0
+            and (
+                previous_update_sec is None
+                or now_sec >= previous_update_sec
+            )
+        )
+        if time_valid:
+            self._last_update_sec = now_sec
+        forward_progress_m = terrain.forward_progress_m
+        escape_inputs_valid = time_valid and all(
+            math.isfinite(value) for value in (
+                terrain.stable_slope_deg,
+                terrain.fast_slope_deg,
+                forward_progress_m,
+                pitch_error_deg,
+                stability.minimum_margin_m,
+                stability.longitudinal_margin_m,
+                stability.lateral_margin_m,
+                traction.average_abs_slip,
+                feasibility.workspace_usage,
+                heading_error_rad,
+                yaw_rate_radps,
+            )
+        )
+        rearmed_now = False
+        if (
+            self._escape_rearm_until_sec is not None
+            and time_valid
+            and now_sec >= self._escape_rearm_until_sec
+        ):
+            self._escape_rearm_until_sec = None
+            self._escape_reason = 'ESCAPE_REARMED'
+            rearmed_now = True
+
+        aborted_this_update = False
+        if self._escape_active:
+            abort_reason = ''
+            if not escape_inputs_valid:
+                abort_reason = 'ESCAPE_ABORT_INVALID_INPUT'
+            elif not drive_enabled:
+                abort_reason = 'ESCAPE_ABORT_DRIVE_DISABLED'
+            elif stability.state == SafetyState.INFEASIBLE:
+                abort_reason = 'ESCAPE_ABORT_STABILITY'
+            elif (
+                stability.state in (SafetyState.STOP, SafetyState.CAUTION)
+                and (
+                    stability.longitudinal_margin_m
+                    > stability.lateral_margin_m + 1.0e-9
+                    or not math.isclose(
+                        stability.minimum_margin_m,
+                        stability.longitudinal_margin_m,
+                        rel_tol=0.0,
+                        abs_tol=1.0e-9,
+                    )
+                )
+            ):
+                abort_reason = 'ESCAPE_ABORT_STABILITY'
+            elif (
+                stability.minimum_margin_m
+                < cfg.mixed_contact_escape_margin_min_m
+                or stability.minimum_margin_m <= 0.0
+            ):
+                abort_reason = 'ESCAPE_ABORT_MARGIN'
+            elif traction.state in (
+                SafetyState.STOP,
+                SafetyState.INFEASIBLE,
+            ) or (
+                traction.average_abs_slip >= 0.15
+            ) or (
+                traction.peak_abs_slip >= cfg.slip_caution_threshold
+            ):
+                abort_reason = 'ESCAPE_ABORT_TRACTION'
+            elif (
+                feasibility.workspace_usage
+                > cfg.mixed_contact_escape_workspace_limit
+            ):
+                abort_reason = 'ESCAPE_ABORT_WORKSPACE'
+            elif (
+                abs(pitch_error_deg)
+                > cfg.mixed_contact_escape_pitch_error_limit_deg
+            ):
+                abort_reason = 'ESCAPE_ABORT_PITCH'
+            elif terrain.contact_phase == ContactPhase.FULL_SLOPE:
+                self._escape_active = False
+                self._clear_escape_timing()
+                self._escape_rearm_until_sec = None
+                self._escape_reason = 'ESCAPE_SUCCESS_FULL_SLOPE'
+            elif (
+                terrain.contact_phase
+                not in self._MIXED_CONTACT_ESCAPE_PHASES
+            ):
+                abort_reason = 'ESCAPE_ABORT_PHASE'
+            elif (
+                self._escape_start_sec is None
+                or now_sec - self._escape_start_sec
+                >= cfg.mixed_contact_escape_max_duration_sec
+            ):
+                abort_reason = 'ESCAPE_ABORT_TIMEOUT'
+            else:
+                if (
+                    self._escape_start_progress_m is None
+                    or self._escape_last_progress_sec is None
+                ):
+                    abort_reason = 'ESCAPE_ABORT_INVALID_INPUT'
+                elif (
+                    forward_progress_m - self._escape_start_progress_m
+                    >= cfg.mixed_contact_escape_min_progress_m
+                ):
+                    self._escape_start_progress_m = forward_progress_m
+                    self._escape_last_progress_sec = now_sec
+                elif (
+                    now_sec - self._escape_last_progress_sec
+                    > cfg.mixed_contact_escape_progress_timeout_sec
+                ):
+                    abort_reason = 'ESCAPE_ABORT_NO_PROGRESS'
+            if abort_reason:
+                self._abort_escape(now_sec, abort_reason)
+                aborted_this_update = True
+
+        longitudinal_limited = (
+            escape_inputs_valid
+            and stability.longitudinal_margin_m
+            <= stability.lateral_margin_m + 1.0e-9
+            and math.isclose(
+                stability.minimum_margin_m,
+                stability.longitudinal_margin_m,
+                rel_tol=0.0,
+                abs_tol=1.0e-9,
+            )
+        )
+        escape_recoverable = (
+            cfg.mixed_contact_escape_enabled
+            and not self._escape_active
+            and not aborted_this_update
+            and not rearmed_now
+            and self._escape_rearm_until_sec is None
+            and terrain.contact_phase in self._MIXED_CONTACT_ESCAPE_PHASES
+            and drive_enabled
+            and escape_inputs_valid
+            and stability.state in (SafetyState.STOP, SafetyState.CAUTION)
+            and longitudinal_limited
+            and stability.minimum_margin_m
+            >= cfg.mixed_contact_escape_margin_min_m
+            and stability.minimum_margin_m
+            < cfg.mixed_contact_escape_margin_max_m
+            and traction.state in (
+                SafetyState.SAFE,
+                SafetyState.CAUTION,
+            )
+            and traction.average_abs_slip < 0.15
+            and traction.peak_abs_slip < cfg.slip_caution_threshold
+            and feasibility.workspace_usage
+            <= cfg.mixed_contact_escape_workspace_limit
+            and abs(pitch_error_deg)
+            <= cfg.mixed_contact_escape_pitch_error_limit_deg
+        )
+        if escape_recoverable:
+            self._escape_active = True
+            self._escape_start_sec = now_sec
+            self._escape_start_progress_m = forward_progress_m
+            self._escape_last_progress_sec = now_sec
+            self._escape_reason = 'RECOVERABLE_MIXED_CONTACT_MARGIN'
+            self._paused = False
+            self._safe_since = None
+
         slope = max(0.0, terrain.stable_slope_deg)
         if terrain.contact_phase in self._ENTRY_PHASES:
             slope = max(slope, terrain.fast_slope_deg)
@@ -158,24 +476,81 @@ class MotionSupervisor:
             cfg.minimum_speed_scale, 1.0,
         )
         stop_reason = stability.stop_reason or traction.stop_reason
-        safe_now = stability_scale > 0.0 and traction_scale > 0.0
-        if not safe_now:
+        safe_now = (
+            escape_inputs_valid
+            and stability_scale > 0.0
+            and traction_scale > 0.0
+        )
+        if self._escape_active:
+            self._paused = False
+            self._safe_since = None
+            stop_reason = ''
+        elif aborted_this_update or not safe_now:
             self._paused = True
             self._safe_since = None
         elif self._paused:
-            self._safe_since = self._safe_since or now_sec
+            if self._safe_since is None:
+                self._safe_since = now_sec
             if now_sec - self._safe_since >= cfg.safe_pause_hold_sec:
                 self._paused = False
                 self._safe_since = None
+        full_slope_healthy = (
+            terrain.contact_phase == ContactPhase.FULL_SLOPE
+            and drive_enabled
+            and stability.state == SafetyState.SAFE
+            and traction.state == SafetyState.SAFE
+            and math.isfinite(pitch_error_deg)
+            and abs(pitch_error_deg)
+            <= cfg.full_slope_pitch_error_limit_deg
+            and math.isfinite(feasibility.workspace_usage)
+            and feasibility.workspace_usage
+            <= cfg.full_slope_workspace_limit
+            and not self._paused
+            and not self._escape_active
+        )
+        if full_slope_healthy:
+            if self._full_slope_safe_since is None:
+                self._full_slope_safe_since = now_sec
+            if (
+                now_sec - self._full_slope_safe_since
+                >= cfg.full_slope_recovery_hold_sec
+            ):
+                self._full_slope_recovered = True
+        else:
+            self._full_slope_safe_since = None
+            self._full_slope_recovered = False
         product = (
             slope_scale * transition_scale * pitch_scale
             * stability_scale * traction_scale * workspace_scale
         )
         if product > 0.0:
             product = max(cfg.minimum_speed_scale, product)
-        target = cfg.requested_speed_mps * product
-        if not drive_enabled or self._paused:
+        if (
+            self._full_slope_recovered
+            and full_slope_healthy
+            and safe_now
+            and not self._paused
+        ):
+            product = max(product, cfg.full_slope_speed_scale)
+        product = clamp(product, 0.0, 1.0)
+        normal_target = cfg.requested_speed_mps * product
+        if not drive_enabled or not escape_inputs_valid:
             target = 0.0
+        elif self._escape_active:
+            target = min(
+                cfg.mixed_contact_escape_speed_mps,
+                cfg.requested_speed_mps,
+            )
+        elif self._paused:
+            target = 0.0
+        else:
+            target = normal_target
+        if aborted_this_update:
+            stop_reason = self._escape_reason
+        elif not escape_inputs_valid:
+            stop_reason = 'INVALID_MOTION_SUPERVISOR_INPUT'
+        if self._paused and not stop_reason:
+            stop_reason = 'SAFE_PAUSE_WAITING_FOR_RECOVERY'
         rate = (
             cfg.wheel_accel_limit_mps2
             if target > self._speed_mps else cfg.wheel_decel_limit_mps2
