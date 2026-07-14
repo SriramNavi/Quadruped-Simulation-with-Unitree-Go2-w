@@ -6,6 +6,8 @@ import csv
 import json
 import math
 import re
+import signal
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +18,8 @@ from geometry_msgs.msg import PoseArray, Twist, Vector3Stamped
 from nav_msgs.msg import Odometry
 
 import rclpy
+from rclpy._rclpy_pybind11 import RCLError
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
@@ -45,6 +49,10 @@ JOINT_NAMES = (
     'RR_calf_joint',
     'RR_foot_joint',
 )
+WHEEL_JOINT_NAMES = (
+    'FL_foot_joint', 'FR_foot_joint', 'RL_foot_joint', 'RR_foot_joint',
+)
+WHEEL_LABELS = ('fl', 'fr', 'rl', 'rr')
 
 
 @dataclass(frozen=True)
@@ -190,6 +198,8 @@ class PrecheckSample:
     joint_states_valid: bool
     odometry_fresh: bool
     joint_states_fresh: bool
+    imu_valid: bool
+    imu_fresh: bool
     cmd_vel_subscriber_count: int
     emergency_stop_active: bool
     base_x_m: float = NAN
@@ -301,6 +311,10 @@ def precheck_blockers(
         blockers.append('WAITING_FOR_JOINT_STATES')
     elif not sample.joint_states_fresh:
         blockers.append('JOINT_STATES_STALE')
+    if not sample.imu_valid:
+        blockers.append('WAITING_FOR_IMU')
+    elif not sample.imu_fresh:
+        blockers.append('IMU_STALE')
     if sample.emergency_stop_active:
         blockers.append('EMERGENCY_STOP_ACTIVE')
     if config.require_cmd_vel_subscriber and sample.cmd_vel_subscriber_count < 1:
@@ -348,6 +362,7 @@ def automation_safety_abort_reason(
     *,
     odometry_fresh: bool,
     joint_states_fresh: bool,
+    imu_fresh: bool,
     cmd_vel_subscriber_available: bool,
     require_cmd_vel_subscriber: bool,
     lane_error_m: float,
@@ -363,6 +378,8 @@ def automation_safety_abort_reason(
         return 'ODOMETRY_TIMEOUT'
     if not joint_states_fresh:
         return 'JOINT_STATES_TIMEOUT'
+    if not imu_fresh:
+        return 'IMU_TIMEOUT'
     if require_cmd_vel_subscriber and not cmd_vel_subscriber_available:
         return 'CMD_VEL_NO_SUBSCRIBER'
     if not math.isfinite(lane_error_m) or abs(lane_error_m) > max_lane_error_m:
@@ -449,6 +466,46 @@ def safe_sequence_value(values: Sequence[float], index: int) -> float:
     except (TypeError, ValueError):
         return NAN
     return value if math.isfinite(value) else NAN
+
+
+def wheel_slip_values(
+    wheel_angular_velocities: Sequence[float],
+    forward_signs: Sequence[float],
+    wheel_radius_m: float,
+    base_forward_velocity_mps: float,
+    epsilon_mps: float = 1.0e-3,
+) -> tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...], float]:
+    """Return forward-positive omega, tread speed, slip, and mean signed slip.
+
+    Positive slip means the wheel tread is moving faster than the base; negative
+    slip indicates braking/skidding. This is a rigid-body observable, not a
+    full deformable-tyre slip model.
+    """
+    if wheel_radius_m <= 0.0 or epsilon_mps <= 0.0:
+        raise ValueError('wheel radius and slip epsilon must be positive')
+    if len(wheel_angular_velocities) != 4 or len(forward_signs) != 4:
+        raise ValueError('exactly four wheel velocities and signs are required')
+    omegas = tuple(
+        float(omega) * float(sign)
+        if finite_values(omega, sign) else NAN
+        for omega, sign in zip(wheel_angular_velocities, forward_signs)
+    )
+    circumferential = tuple(
+        wheel_radius_m * omega if math.isfinite(omega) else NAN
+        for omega in omegas
+    )
+    slips = []
+    for tread_speed in circumferential:
+        if not finite_values(tread_speed, base_forward_velocity_mps):
+            slips.append(NAN)
+            continue
+        denominator = max(
+            abs(tread_speed), abs(base_forward_velocity_mps), epsilon_mps,
+        )
+        slips.append((tread_speed - base_forward_velocity_mps) / denominator)
+    finite_slips = [value for value in slips if math.isfinite(value)]
+    average = sum(finite_slips) / len(finite_slips) if finite_slips else NAN
+    return omegas, circumferential, tuple(slips), average
 
 
 def extract_joint_values(
@@ -899,7 +956,8 @@ class GroundTruthOdometryAdapter(Node):
 def csv_columns() -> list[str]:
     """Return the stable per-trial CSV schema."""
     columns = [
-        'sim_time_sec', 'wall_time_iso', 'trial_id', 'ramp_angle_deg',
+        'sim_time_sec', 'elapsed_time_sec', 'wall_time_iso', 'trial_id',
+        'friction_preset', 'ramp_angle_deg',
         'target_speed_mps', 'state', 'base_x_m', 'base_y_m', 'base_z_m',
         'roll_deg', 'pitch_deg', 'yaw_deg', 'body_up_alignment',
         'linear_vx_mps', 'linear_vy_mps', 'linear_vz_mps',
@@ -910,7 +968,22 @@ def csv_columns() -> list[str]:
         'imu_pitch_deg', 'imu_yaw_deg', 'imu_angular_x_radps',
         'imu_angular_y_radps', 'imu_angular_z_radps', 'imu_accel_x_mps2',
         'imu_accel_y_mps2', 'imu_accel_z_mps2',
+        'imu_qx', 'imu_qy', 'imu_qz', 'imu_qw', 'imu_timestamp_sec',
+        'imu_frame_id', 'imu_quaternion_norm', 'imu_data_valid', 'imu_fresh',
+        'wheel_radius_m',
+        'wheel_mu_longitudinal', 'wheel_mu_lateral',
+        'wheel_slip_longitudinal', 'wheel_slip_lateral',
+        'wheel_contact_stiffness', 'wheel_contact_damping',
+        'terrain_mu_longitudinal', 'terrain_mu_lateral',
+        'distance_travelled_m',
     ]
+    for label in WHEEL_LABELS:
+        columns.extend((
+            f'wheel_{label}_angular_velocity_radps',
+            f'wheel_{label}_circumferential_velocity_mps',
+            f'wheel_{label}_slip_ratio',
+        ))
+    columns.append('average_longitudinal_slip_ratio')
     for name in JOINT_NAMES:
         columns.extend((
             f'{name}_position_rad',
@@ -964,11 +1037,21 @@ class Go2WSlopeTestMonitor(Node):
         self.cmd_angular = NAN
         self.wheel_commands = [NAN] * 4
         self.emergency_stop: bool | None = None
-        self.imu_values = [NAN] * 9
+        self.imu_values = [NAN] * 13
+        self.imu_timestamp_sec = NAN
+        self.imu_frame_id = ''
+        self.imu_quaternion_norm = NAN
+        self.imu_valid = False
         self.odometry_valid = False
         self.joints_valid = False
         self.last_odometry_receive_sec: float | None = None
         self.last_joint_states_receive_sec: float | None = None
+        self.last_imu_receive_sec: float | None = None
+        self.last_imu_header_stamp_sec: float | None = None
+        self.first_imu_header_stamp_sec: float | None = None
+        self.imu_message_count = 0
+        self.imu_invalid_message_count = 0
+        self.imu_frame_ids: set[str] = set()
         self.initial_base_x: float | None = None
         self.seen_cmd = False
         self.seen_wheel_commands = False
@@ -1048,7 +1131,7 @@ class Go2WSlopeTestMonitor(Node):
             'trial_id': 'trial_01',
             'target_speed_mps': 0.25,
             'operator_note': '',
-            'log_directory': '~/quad_ws/logs/slope_tests',
+            'log_directory': '',
             'sample_rate_hz': 20.0,
             'trial_timeout_sec': 60.0,
             'result_hold_sec': 2.0,
@@ -1094,7 +1177,24 @@ class Go2WSlopeTestMonitor(Node):
             'precheck_timeout_sec': 30.0,
             'odometry_timeout_sec': 0.5,
             'joint_states_timeout_sec': 0.5,
+            'imu_timeout_sec': 0.5,
             'cmd_vel_subscriber_grace_sec': 0.5,
+            'friction_preset': 'dry_concrete',
+            'effective_friction_label': 'dry_concrete',
+            'wheel_radius_m': 0.086,
+            'wheel_velocity_sign_fl': 1.0,
+            'wheel_velocity_sign_fr': 1.0,
+            'wheel_velocity_sign_rl': 1.0,
+            'wheel_velocity_sign_rr': 1.0,
+            'slip_epsilon_mps': 0.001,
+            'wheel_mu_longitudinal': 1.2,
+            'wheel_mu_lateral': 1.0,
+            'wheel_slip_longitudinal': 0.0001,
+            'wheel_slip_lateral': 0.0001,
+            'wheel_contact_stiffness': 1000000.0,
+            'wheel_contact_damping': 100.0,
+            'terrain_mu_longitudinal': 1.0,
+            'terrain_mu_lateral': 1.0,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -1115,7 +1215,35 @@ class Go2WSlopeTestMonitor(Node):
         self.trial_id = str(self._value('trial_id'))
         self.target_speed_mps = float(self._value('target_speed_mps'))
         self.operator_note = str(self._value('operator_note'))
-        self.log_directory = Path(str(self._value('log_directory'))).expanduser()
+        self.friction_preset = str(self._value('friction_preset'))
+        self.effective_friction_label = str(
+            self._value('effective_friction_label')
+        )
+        configured_log_directory = str(self._value('log_directory')).strip()
+        safe_preset = re.sub(
+            r'[^A-Za-z0-9_.-]+', '_', self.friction_preset,
+        ).strip('_') or 'custom'
+        self.log_directory = (
+            Path(configured_log_directory).expanduser()
+            if configured_log_directory else
+            Path('~/quad_ws/logs').expanduser()
+            / f'slope_{self.ramp_angle_deg}deg' / safe_preset
+        )
+        self.wheel_radius_m = float(self._value('wheel_radius_m'))
+        self.wheel_forward_signs = tuple(
+            float(self._value(f'wheel_velocity_sign_{label}'))
+            for label in WHEEL_LABELS
+        )
+        self.slip_epsilon_mps = float(self._value('slip_epsilon_mps'))
+        self.friction_values = {
+            name: float(self._value(name))
+            for name in (
+                'wheel_mu_longitudinal', 'wheel_mu_lateral',
+                'wheel_slip_longitudinal', 'wheel_slip_lateral',
+                'wheel_contact_stiffness', 'wheel_contact_damping',
+                'terrain_mu_longitudinal', 'terrain_mu_lateral',
+            )
+        }
         self.sample_rate_hz = float(self._value('sample_rate_hz'))
         self.result_hold_sec = float(self._value('result_hold_sec'))
         self.auto_stop = bool(self._value('auto_stop_logging_on_result'))
@@ -1178,6 +1306,7 @@ class Go2WSlopeTestMonitor(Node):
         self.joint_states_timeout_sec = float(
             self._value('joint_states_timeout_sec')
         )
+        self.imu_timeout_sec = float(self._value('imu_timeout_sec'))
         self.cmd_vel_subscriber_grace_sec = float(
             self._value('cmd_vel_subscriber_grace_sec')
         )
@@ -1190,6 +1319,17 @@ class Go2WSlopeTestMonitor(Node):
             raise ValueError('sample_rate_hz must be greater than zero')
         if self.result_hold_sec < 0.0:
             raise ValueError('result_hold_sec must not be negative')
+        if self.wheel_radius_m <= 0.0 or self.slip_epsilon_mps <= 0.0:
+            raise ValueError('wheel_radius_m and slip_epsilon_mps must be positive')
+        if any(sign not in (-1.0, 1.0) for sign in self.wheel_forward_signs):
+            raise ValueError('wheel velocity signs must each be -1.0 or 1.0')
+        if any(value <= 0.0 for name, value in self.friction_values.items()
+               if 'slip' not in name):
+            raise ValueError('friction coefficients and contact metadata must be positive')
+        if any(self.friction_values[name] < 0.0 for name in (
+            'wheel_slip_longitudinal', 'wheel_slip_lateral',
+        )):
+            raise ValueError('wheel slip compliance must be nonnegative')
         positive_values = {
             'target_speed_mps': self.target_speed_mps,
             'acceleration_mps2': self.acceleration_mps2,
@@ -1200,6 +1340,7 @@ class Go2WSlopeTestMonitor(Node):
             'precheck_timeout_sec': self.precheck_timeout_sec,
             'odometry_timeout_sec': self.odometry_timeout_sec,
             'joint_states_timeout_sec': self.joint_states_timeout_sec,
+            'imu_timeout_sec': self.imu_timeout_sec,
         }
         invalid = [name for name, value in positive_values.items() if value <= 0.0]
         if invalid:
@@ -1254,8 +1395,10 @@ class Go2WSlopeTestMonitor(Node):
         safe_trial_id = re.sub(r'[^A-Za-z0-9_.-]+', '_', self.trial_id).strip('_')
         safe_trial_id = safe_trial_id or 'trial'
         stem = (
-            f'{timestamp:%Y%m%d_%H%M%S}_go2w_'
-            f'{self.ramp_angle_deg}deg_{safe_trial_id}'
+            f'imu_slip_{self.ramp_angle_deg}deg_'
+            f'{re.sub(r"[^A-Za-z0-9_.-]+", "_", self.friction_preset)}_'
+            f'mu{str(self.friction_values["wheel_mu_longitudinal"]).replace(".", "p")}_'
+            f'{timestamp:%Y%m%d_%H%M%S}_{safe_trial_id}'
         )
         self.csv_path = (self.log_directory / f'{stem}.csv').resolve()
         self.summary_path = (self.log_directory / f'{stem}_summary.json').resolve()
@@ -1355,6 +1498,15 @@ class Go2WSlopeTestMonitor(Node):
 
     def _imu_callback(self, message: Imu) -> None:
         orientation = message.orientation
+        stamp_sec = (
+            float(message.header.stamp.sec)
+            + float(message.header.stamp.nanosec) * 1.0e-9
+        )
+        frame_id = message.header.frame_id.strip()
+        quaternion_norm = math.sqrt(
+            orientation.x ** 2 + orientation.y ** 2
+            + orientation.z ** 2 + orientation.w ** 2
+        )
         try:
             roll, pitch, yaw = quaternion_to_rpy(
                 orientation.x, orientation.y, orientation.z, orientation.w,
@@ -1362,15 +1514,48 @@ class Go2WSlopeTestMonitor(Node):
             rpy = [math.degrees(value) for value in (roll, pitch, yaw)]
         except ValueError:
             rpy = [NAN] * 3
-        self.imu_values = rpy + [
+        values = rpy + [
             message.angular_velocity.x,
             message.angular_velocity.y,
             message.angular_velocity.z,
             message.linear_acceleration.x,
             message.linear_acceleration.y,
             message.linear_acceleration.z,
+            orientation.x,
+            orientation.y,
+            orientation.z,
+            orientation.w,
         ]
-        self.seen_imu = finite_values(*self.imu_values)
+        timestamp_increasing = (
+            self.last_imu_header_stamp_sec is None
+            or stamp_sec > self.last_imu_header_stamp_sec
+        )
+        valid = (
+            bool(frame_id)
+            and finite_values(stamp_sec, quaternion_norm, *values)
+            and stamp_sec >= 0.0
+            and abs(quaternion_norm - 1.0) <= 1.0e-3
+            and timestamp_increasing
+        )
+        self.imu_valid = valid
+        if not valid:
+            self.imu_invalid_message_count += 1
+            self.get_logger().warning(
+                'Rejected invalid IMU message (frame, timestamp, quaternion, or vectors)',
+                throttle_duration_sec=5.0,
+            )
+            return
+        self.imu_values = values
+        self.imu_timestamp_sec = stamp_sec
+        self.imu_frame_id = frame_id
+        self.imu_quaternion_norm = quaternion_norm
+        self.last_imu_receive_sec = self.get_clock().now().nanoseconds * 1.0e-9
+        self.last_imu_header_stamp_sec = stamp_sec
+        if self.first_imu_header_stamp_sec is None:
+            self.first_imu_header_stamp_sec = stamp_sec
+        self.imu_message_count += 1
+        self.imu_frame_ids.add(frame_id)
+        self.seen_imu = True
 
     @staticmethod
     def _is_fresh(last_receive_sec: float | None, timeout_sec: float, now_sec: float) -> bool:
@@ -1390,6 +1575,11 @@ class Go2WSlopeTestMonitor(Node):
             self.last_joint_states_receive_sec,
             self.joint_states_timeout_sec,
             now_sec,
+        )
+
+    def _imu_fresh(self, now_sec: float) -> bool:
+        return self._is_fresh(
+            self.last_imu_receive_sec, self.imu_timeout_sec, now_sec,
         )
 
     def _cmd_vel_subscriber_count(self) -> int:
@@ -1439,6 +1629,8 @@ class Go2WSlopeTestMonitor(Node):
             joint_states_valid=self.joints_valid,
             odometry_fresh=self._odometry_fresh(now_sec),
             joint_states_fresh=self._joint_states_fresh(now_sec),
+            imu_valid=self.imu_valid,
+            imu_fresh=self._imu_fresh(now_sec),
             cmd_vel_subscriber_count=self._cmd_vel_subscriber_count(),
             emergency_stop_active=(
                 self.emergency_stop is True and not self.runner_estop_asserted
@@ -1528,6 +1720,7 @@ class Go2WSlopeTestMonitor(Node):
             joint_states_fresh=(
                 self.joints_valid and self._joint_states_fresh(now_sec)
             ),
+            imu_fresh=(self.imu_valid and self._imu_fresh(now_sec)),
             cmd_vel_subscriber_available=subscriber_available,
             require_cmd_vel_subscriber=self.precheck_config.require_cmd_vel_subscriber,
             lane_error_m=lane_error,
@@ -1538,7 +1731,9 @@ class Go2WSlopeTestMonitor(Node):
                 self.emergency_stop is True and not self.runner_estop_asserted
             ),
         )
-        return reason, reason in {'ODOMETRY_TIMEOUT', 'JOINT_STATES_TIMEOUT'}
+        return reason, reason in {
+            'ODOMETRY_TIMEOUT', 'JOINT_STATES_TIMEOUT', 'IMU_TIMEOUT',
+        }
 
     def _run_precheck(self, now_sec: float, base: Sequence[float]) -> None:
         self._publish_zero()
@@ -1886,6 +2081,14 @@ class Go2WSlopeTestMonitor(Node):
 
     def _make_row(self, now_sec: float, base: Sequence[float], state: str) -> dict:
         row = dict.fromkeys(csv_columns(), NAN)
+        wheel_kinematics = wheel_slip_values(
+            [self.joints[name][1] for name in WHEEL_JOINT_NAMES],
+            self.wheel_forward_signs,
+            self.wheel_radius_m,
+            base[7],
+            self.slip_epsilon_mps,
+        )
+        wheel_omegas, wheel_speeds, wheel_slips, average_slip = wheel_kinematics
         base_keys = (
             'base_x_m', 'base_y_m', 'base_z_m', 'roll_deg', 'pitch_deg',
             'yaw_deg', 'body_up_alignment', 'linear_vx_mps', 'linear_vy_mps',
@@ -1894,8 +2097,10 @@ class Go2WSlopeTestMonitor(Node):
         )
         row.update({
             'sim_time_sec': now_sec,
+            'elapsed_time_sec': self.machine.elapsed(now_sec),
             'wall_time_iso': datetime.now().astimezone().isoformat(),
             'trial_id': self.trial_id,
+            'friction_preset': self.friction_preset,
             'ramp_angle_deg': self.ramp_angle_deg,
             'target_speed_mps': self.target_speed_mps,
             'state': state,
@@ -1917,6 +2122,22 @@ class Go2WSlopeTestMonitor(Node):
             'imu_accel_x_mps2': self.imu_values[6],
             'imu_accel_y_mps2': self.imu_values[7],
             'imu_accel_z_mps2': self.imu_values[8],
+            'imu_qx': self.imu_values[9],
+            'imu_qy': self.imu_values[10],
+            'imu_qz': self.imu_values[11],
+            'imu_qw': self.imu_values[12],
+            'imu_timestamp_sec': self.imu_timestamp_sec,
+            'imu_frame_id': self.imu_frame_id,
+            'imu_quaternion_norm': self.imu_quaternion_norm,
+            'imu_data_valid': self.imu_valid,
+            'imu_fresh': self._imu_fresh(now_sec),
+            'wheel_radius_m': self.wheel_radius_m,
+            'distance_travelled_m': (
+                base[0] - self.initial_base_x
+                if self.initial_base_x is not None and math.isfinite(base[0])
+                else NAN
+            ),
+            'average_longitudinal_slip_ratio': average_slip,
             'warning_active': self.machine.warning_active,
             'topple_condition_active': self.machine.topple_condition_active,
             'slide_back_detected': self.machine.slide_back_detected,
@@ -1948,6 +2169,11 @@ class Go2WSlopeTestMonitor(Node):
             'platform_success_start_x_m': self.geometry.success_min_x,
             'platform_success_end_x_m': self.geometry.success_max_x,
         })
+        row.update(self.friction_values)
+        for index, label in enumerate(WHEEL_LABELS):
+            row[f'wheel_{label}_angular_velocity_radps'] = wheel_omegas[index]
+            row[f'wheel_{label}_circumferential_velocity_mps'] = wheel_speeds[index]
+            row[f'wheel_{label}_slip_ratio'] = wheel_slips[index]
         row.update(dict(zip(base_keys, base)))
         for name, values in self.joints.items():
             row[f'{name}_position_rad'] = values[0]
@@ -2056,12 +2282,40 @@ class Go2WSlopeTestMonitor(Node):
             'pitch_deg': self._json_number(final_base[4]),
             'yaw_deg': self._json_number(final_base[5]),
         }
+        imu_message_rate_hz = NAN
+        if (
+            self.imu_message_count > 1
+            and self.first_imu_header_stamp_sec is not None
+            and self.last_imu_header_stamp_sec is not None
+            and self.last_imu_header_stamp_sec > self.first_imu_header_stamp_sec
+        ):
+            imu_message_rate_hz = (
+                (self.imu_message_count - 1)
+                / (self.last_imu_header_stamp_sec - self.first_imu_header_stamp_sec)
+            )
         try:
             self.csv_file.flush()
             self.csv_file.close()
         finally:
             summary = {
                 'trial_id': self.trial_id,
+                'requested_preset': self.friction_preset,
+                'friction_preset': self.friction_preset,
+                'effective_friction_label': self.effective_friction_label,
+                'friction_parameters': self.friction_values,
+                'wheel_radius_m': self.wheel_radius_m,
+                'wheel_velocity_forward_signs': dict(zip(
+                    WHEEL_LABELS, self.wheel_forward_signs,
+                )),
+                'slip_ratio_definition': (
+                    '(r*omega_forward-vx)/max(abs(r*omega_forward),abs(vx),epsilon)'
+                ),
+                'slip_epsilon_mps': self.slip_epsilon_mps,
+                'contact_engine_note': (
+                    'Gazebo Harmonic DART applies mu/mu2/fdir1/slip1/slip2; '
+                    'wheel_contact_stiffness and wheel_contact_damping are '
+                    'recorded metadata because DART rigid contact ignores ODE kp/kd.'
+                ),
                 'ramp_angle_deg': self.ramp_angle_deg,
                 'lane_y': self.lane_y,
                 'target_speed_mps': self.target_speed_mps,
@@ -2115,6 +2369,10 @@ class Go2WSlopeTestMonitor(Node):
                 'start_timestamp': self.start_timestamp,
                 'end_timestamp': datetime.now().astimezone().isoformat(),
                 'data_source_topics': self.topics,
+                'imu_message_count': self.imu_message_count,
+                'imu_invalid_message_count': self.imu_invalid_message_count,
+                'imu_message_rate_hz': self._json_number(imu_message_rate_hz),
+                'imu_frame_ids': sorted(self.imu_frame_ids),
                 'missing_data_fields': self._missing_data_fields(),
                 'configuration_thresholds': self.thresholds,
             }
@@ -2140,12 +2398,26 @@ def main(args=None) -> None:
     """Run the slope monitor."""
     # Keep the context valid while KeyboardInterrupt runs the explicit safe-stop
     # path; the default rclpy SIGINT handler shuts the context down too early.
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
     rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = None
     try:
         node = Go2WSlopeTestMonitor()
+
+        def wait_for_interrupt() -> None:
+            signal.sigwait({signal.SIGINT})
+            if node is not None:
+                node.close('OPERATOR_INTERRUPT')
+            if rclpy.ok():
+                rclpy.shutdown()
+
+        threading.Thread(
+            target=wait_for_interrupt,
+            name='go2w_monitor_sigint',
+            daemon=True,
+        ).start()
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException, RCLError):
         if node is not None:
             node.close('OPERATOR_INTERRUPT')
     finally:
@@ -2163,7 +2435,7 @@ def ground_truth_adapter_main(args=None) -> None:
     try:
         node = GroundTruthOdometryAdapter()
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException, RCLError):
         pass
     finally:
         if node is not None:

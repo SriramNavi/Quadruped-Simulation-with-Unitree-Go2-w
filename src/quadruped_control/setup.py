@@ -33,6 +33,11 @@ setup(
             'go2w_slope_test_monitor = quadruped_control.go2w_slope_test_monitor:main',
             'go2w_ground_truth_adapter = '
             'quadruped_control.go2w_slope_test_monitor:ground_truth_adapter_main',
+            'go2w_friction_plots = quadruped_control.go2w_friction_plots:main',
+            'go2w_friction_presets = '
+            'quadruped_control.go2w_friction_presets:main',
+            'go2w_imu_ik_controller = '
+            'quadruped_control.go2w_imu_ik_controller:main',
         ],
     },
 )

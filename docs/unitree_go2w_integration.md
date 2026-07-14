@@ -100,9 +100,10 @@ The controller uses SI units throughout:
 - wheel controller output: radians per second
 - geometry dimensions: metres
 
-The local upstream Go2-W URDF uses the same wheel DAE mesh for visual and collision
-geometry. The mesh has a maximum rolling-plane radius of `0.0860003 m`, giving the
-configured `wheel_radius_m = 0.086 m`.
+The imported wheel DAE remains the visual geometry. Contact uses a measured cylinder
+with radius `0.086 m`, length `0.052 m`, and tread centre `0.048092 m` outboard.
+This removes mesh-facet contact noise while preserving the rendered model. The source
+mesh has a maximum rolling-plane radius of `0.0860003 m`.
 
 In the neutral leg pose, each wheel joint chain is `0.0465 + 0.0955 = 0.142 m`
 from the base centreline. The centre of the wheel tread in the mesh is another
@@ -325,8 +326,9 @@ independently and the monitor never publishes motion or emergency-stop commands.
 The monitor launch never starts Gazebo or keyboard teleop.
 
 The monitor reads `/joint_states`, `/cmd_vel`,
-`/go2w_wheel_velocity_controller/commands`, `/go2w/emergency_stop`, optional
-`/imu/data`, and normalized Gazebo ground truth on `/go2w/ground_truth/odom`.
+`/go2w_wheel_velocity_controller/commands`, `/go2w/emergency_stop`, `/imu/data`,
+and normalized Gazebo ground truth on `/go2w/ground_truth/odom`. Automated trials
+require IMU readiness; passive monitoring can still start before IMU data arrives.
 The monitoring launch bridges the verified Gazebo Harmonic
 `/world/go2w_slope_test/dynamic_pose/info` Pose_V stream to a timestamped
 `PoseArray`; a small adapter selects the verified model pose at index zero, derives
@@ -491,6 +493,176 @@ and effort, and `/joint_states.effort` contained finite simulated values. These
 values are physics-engine joint feedback and are not validated actuator-torque
 measurements.
 
+## Explicit Wheel and Terrain Contact
+
+The previous simulation was not necessarily frictionless: Gazebo supplied implicit
+contact defaults where the robot had no explicit wheel parameters. The current model
+makes wheel and terrain behaviour reproducible. Gazebo Harmonic (Sim 8) loads Gazebo
+Physics 7's default DART 6.13 engine. DART reads the SDF `ode` fields `mu`, `mu2`,
+`fdir1`, `slip1`, and `slip2`; the naming is an SDFormat compatibility convention and
+does not mean that Gazebo Classic or the ODE engine is active.
+
+The wheel-local +X direction is longitudinal, and +Y is the wheel axis. The collision
+cylinder is rotated by `rpy="pi/2 0 0"`, so its cylinder axis aligns with the joint's
+`0 1 0` axis. DART combines two contacting surfaces using the smaller coefficient in
+each direction and adds their force-dependent slip compliances. Slip compliance has
+units `m/s/N`. The dry-concrete defaults are wheel `mu/mu2=1.2/1.0`, terrain
+`1.0/1.0`, and wheel `slip1/slip2=0.0001/0.0001 m/s/N`.
+
+DART's rigid-contact path does not consume ODE `kp` or `kd`; the requested
+`1.0e6 N/m` stiffness and `100 N·s/m` damping values are retained only in experiment
+metadata for reproducibility and possible future ODE-compatible use. They are not
+claimed as active DART parameters.
+
+Presets live in the read-only authoritative file
+`unitree_go2w_description/config/go2w_friction_presets.yaml`. The runtime path is:
+
+```text
+preset YAML -> launch-time resolution -> optional overrides
+            -> unique /tmp robot.sdf + world.sdf + effective_friction.yaml
+            -> Gazebo
+```
+
+The preset is resolved first and each non-empty terminal override is applied second.
+An explicit `0.0` is an override, not an empty value. Values must be finite and
+non-negative. Unknown presets and malformed values fail before Gazebo starts.
+The source URDF, Xacro, world, preset YAML, and launch files are never rewritten.
+The unique runtime directory is removed on normal launch shutdown; a directory left
+after a crash cannot collide with a later launch.
+
+Inspect the installed authoritative configuration with:
+
+```bash
+ros2 run quadruped_control go2w_friction_presets list
+ros2 run quadruped_control go2w_friction_presets show dry_concrete
+ros2 run quadruped_control go2w_friction_presets validate
+ros2 run quadruped_control go2w_friction_presets path
+```
+
+Select any named condition without editing a file:
+
+```bash
+ros2 launch quadruped_bringup go2w_reference.launch.py \
+  friction_preset:=dry_concrete
+ros2 launch quadruped_bringup go2w_reference.launch.py \
+  friction_preset:=smooth_tile
+ros2 launch quadruped_bringup go2w_reference.launch.py \
+  friction_preset:=wet_tile
+ros2 launch quadruped_bringup go2w_reference.launch.py \
+  friction_preset:=loose_soil
+ros2 launch quadruped_bringup go2w_reference.launch.py \
+  friction_preset:=low_friction
+ros2 launch quadruped_bringup go2w_reference.launch.py \
+  friction_preset:=zero_friction
+
+ros2 launch quadruped_bringup go2w_reference.launch.py \
+  friction_preset:=dry_concrete \
+  wheel_mu_longitudinal:=0.35 wheel_mu_lateral:=0.30 \
+  terrain_mu_longitudinal:=0.35 terrain_mu_lateral:=0.30
+```
+
+The snapshot records the requested preset, effective label, every effective contact
+value, fixed wheel collision dimensions, DART, ramp angle, generated paths, and run
+identifier. CSV rows and summary JSON receive the same resolved values. In the
+automated runner, `EXTRA_LAUNCH_ARGS` forwards friction overrides to both simulation
+and logger. A supplied output directory must not already exist:
+
+```bash
+EXTRA_LAUNCH_ARGS="wheel_mu_longitudinal:=0.35 terrain_mu_longitudinal:=0.35" \
+GUI=false ./scripts/run_go2w_friction_experiment.sh \
+  dry_concrete logs/custom 65 3 0.25 custom_01
+```
+
+To verify immutability independently, hash the authoritative files and compare
+`git status --short` before and after a bounded launch. The automated contact
+generation test performs this check for dry, zero, custom, and explicit-zero cases.
+
+### Friction-aware logging and plots
+
+The existing slope monitor now logs forward-positive measured wheel angular velocity,
+tread velocity, and the observable rigid-body slip ratio
+
+```text
+(r * omega_forward - base_vx) / max(|r * omega_forward|, |base_vx|, epsilon)
+```
+
+Zero is near pure rolling, positive means wheel spin, and negative means the wheel is
+slower than the body (braking/skidding). This is not an exact deformable-tyre metric.
+All current wheel axes use the same forward sign; four sign parameters are available
+if the URDF changes. Default output is written under
+`~/quad_ws/logs/slope_15deg/<preset>/` without overwriting older logs.
+
+```bash
+ros2 launch quadruped_bringup go2w_slope_monitor.launch.py \
+  friction_preset:=dry_concrete trial_id:=trial_01
+
+ros2 run quadruped_control go2w_friction_plots single RUN.csv \
+  --output-directory plots/dry_concrete
+
+ros2 run quadruped_control go2w_friction_plots compare RUN1.csv RUN2.csv \
+  --output-directory plots/comparison
+```
+
+For a bounded automated baseline (Gazebo, controller readiness checks, drive converter,
+logger, graceful stop), run dry concrete manually before attempting a matrix:
+
+```bash
+./scripts/run_go2w_friction_experiment.sh dry_concrete '' 60 3 0.25 trial_01
+./scripts/run_go2w_friction_experiment.sh smooth_tile logs/smooth 65 3 0.25 smooth_01
+./scripts/run_go2w_friction_experiment.sh wet_tile logs/wet 65 3 0.25 wet_01
+./scripts/run_go2w_friction_experiment.sh loose_soil logs/soil 65 3 0.25 soil_01
+./scripts/run_go2w_friction_experiment.sh low_friction logs/low 65 3 0.25 low_01
+./scripts/run_go2w_friction_experiment.sh zero_friction logs/zero 65 3 0.25 zero_01
+```
+
+An explicit all-zero override is accepted independently of the named zero preset:
+
+```bash
+ros2 launch quadruped_bringup go2w_reference.launch.py \
+  friction_preset:=dry_concrete \
+  wheel_mu_longitudinal:=0.0 wheel_mu_lateral:=0.0 \
+  terrain_mu_longitudinal:=0.0 terrain_mu_lateral:=0.0 \
+  wheel_slip_longitudinal:=0.0 wheel_slip_lateral:=0.0
+```
+
+The summary derives climb success from the existing platform pose/height/upright state
+condition, not elapsed time. Rigid Coulomb contact cannot reproduce tyre deformation or
+deformable mud, sand, grass, and loose-soil terramechanics.
+
+### Restored Gazebo IMU path
+
+The friction-aware pipeline originally rendered `go2w_gazebo_control.urdf.xacro`
+without the IMU sensor and `go2w_reference.launch.py` bridged only `/clock`. The
+earlier Unitree Go2 launch worked because its Gazebo Xacro defined `imu_sensor` and
+its parameter bridge included `/imu/data@sensor_msgs/msg/Imu[gz.msgs.IMU`.
+
+The restored sensor is defined on link `imu` in
+`unitree_go2w_description/urdf/go2w_gazebo_control.urdf.xacro`. It publishes
+Gazebo Transport `/imu/data` at 100 Hz with frame `imu`; the reference launch
+bridges that stream to ROS `/imu/data`. The previous gyro and accelerometer noise
+settings are preserved exactly. Automated monitoring now requires a finite,
+normalized, timestamp-increasing IMU sample before motion and aborts after a
+0.5 s IMU timeout. Orientation covariance remains zero because Gazebo does not
+populate it; gyro and accelerometer covariances reflect the configured noise.
+
+```bash
+ros2 launch quadruped_bringup go2w_reference.launch.py \
+  rviz:=false gui:=false friction_preset:=dry_concrete
+ros2 launch quadruped_bringup go2w_slope_monitor.launch.py \
+  ramp_angle_deg:=15 lane_y:=-6.0 friction_preset:=dry_concrete \
+  trial_id:=dry_concrete_imu_restored_01
+GUI=false ./scripts/run_go2w_friction_experiment.sh \
+  dry_concrete '' 65 3 0.25 dry_concrete_imu_restored_01
+ros2 run quadruped_control go2w_friction_plots single RUN.csv \
+  --output-directory plots/dry_concrete_imu_restored_01
+```
+
+The 2026-07-11 explicit dry-concrete rerun succeeded in 41.40 s. Its 100 Hz IMU
+stream and all active-trial slip rows were valid; ramp mean absolute slip was
+0.0205 and peak absolute ramp slip was 0.3058. The earlier comparison baseline
+used implicit/default contact, not zero friction; this rerun uses explicit
+dry-concrete wheel/terrain friction plus IMU and slip logging.
+
 ## Current Limitations
 
 - Manual Gazebo mode has minimal `gz_ros2_control` support only.
@@ -502,3 +674,54 @@ measurements.
 - The Go2-W has no mechanically steered wheels, so physical turning still relies on
   tyre-ground slip. This implementation makes skid steering smooth and controlled rather
   than eliminating slip completely.
+- DART rigid contact does not apply the logged stiffness/damping metadata.
+- The cylinder represents the overall measured wheel envelope, not tread-block or tyre
+  deformation geometry.
+- SDFormat lumps the existing zero-mass fixed `imu` link into `base` internally;
+  the sensor remains defined against `imu` and publishes frame ID `imu`.
+- Gazebo supplies zero orientation covariance for this simulated IMU.
+
+## IMU pitch leveling with analytical IK
+
+`go2w_imu_ik_controller` is a standalone outer-loop pitch controller. It filters
+the Gazebo `/imu/data` pitch and evaluates
+`u = kp * (target - pitch) + ki * integral - kd * angular_velocity_y`. Positive
+correction raises the front wheel targets and lowers the rear targets in the body
+frame. The four resulting targets are solved by analytical three-DOF leg IK using
+the URDF dimensions (0.0955 m hip offset, 0.213 m thigh, and 0.2264 m to the wheel
+centre).
+
+The selected backend publishes the twelve leg positions directly to
+`/go2w_leg_position_controller/commands`; it never commands wheel joints. This is
+safe only because `go2w_reference.launch.py` does not launch CHAMP or another leg
+command publisher. Active mode refuses to start, and faults, if the position
+controller is absent or another publisher appears. Monitor and shadow modes never
+send commands. Shadow is the default.
+
+Terminal 1 runs the world and visualization tools only:
+
+```bash
+ros2 launch quadruped_bringup go2w_imu_ik_world.launch.py \
+  gui:=true rviz:=false friction_preset:=dry_concrete spawn_on_ramp:=true \
+  launch_rqt_graph:=true launch_rqt_plot:=true
+```
+
+Terminal 2 runs the independently controlled node:
+
+```bash
+CONFIG=$(ros2 pkg prefix quadruped_control)/share/quadruped_control/config/go2w_imu_ik_controller.yaml
+ros2 run quadruped_control go2w_imu_ik_controller --ros-args \
+  --params-file "$CONFIG" -p mode:=shadow -p target_pitch_deg:=0.0
+ros2 service call /go2w/imu_ik/enable std_srvs/srv/SetBool "{data: true}"
+ros2 service call /go2w/imu_ik/enable std_srvs/srv/SetBool "{data: false}"
+ros2 service call /go2w/imu_ik/reset std_srvs/srv/Trigger "{}"
+```
+
+`rqt_graph` shows node/topic connectivity, not values. `rqt_plot` is preloaded with
+raw, filtered, target, and error pitch plus PID output and front/rear offsets under
+`/go2w/imu_ik/...`. Diagnostics report stale input, invalid IMU data, fall limits,
+IK failure, saturation timeout, backend loss, and publisher conflicts. A bounded
+2026-07-13 static dry-concrete test tuned `kp=7.0`, `ki=0`, `kd=0.15`, a 15 degree
+correction limit, and a 0.055 m leg-offset limit. Pitch settled at approximately
+−1.874 degrees from approximately −15 degrees without observed IK failure or
+saturation. Dynamic-climb behavior has not yet been validated with these gains.

@@ -16,7 +16,9 @@ go2w_slope_test_monitor:
     # Logging
     trial_id: trial_01
     operator_note: ''
-    log_directory: ~/quad_ws/logs/slope_tests
+    # Empty selects ~/quad_ws/logs/slope_<angle>deg/<friction_preset>.
+    # An explicit path remains supported and is used as-is.
+    log_directory: ''
     sample_rate_hz: 20.0
     result_hold_sec: 2.0
     auto_stop_logging_on_result: true
@@ -75,7 +77,27 @@ go2w_slope_test_monitor:
     max_heading_error_before_abort_deg: 15.0
     odometry_timeout_sec: 0.5
     joint_states_timeout_sec: 0.5
+    imu_timeout_sec: 0.5
     cmd_vel_subscriber_grace_sec: 0.5
+
+    # Friction-aware wheel-slip logging. All joint axes are +Y in the current
+    # URDF, so every forward-positive sign is +1. Override if the model changes.
+    friction_preset: dry_concrete
+    wheel_radius_m: 0.086
+    wheel_velocity_sign_fl: 1.0
+    wheel_velocity_sign_fr: 1.0
+    wheel_velocity_sign_rl: 1.0
+    wheel_velocity_sign_rr: 1.0
+    slip_epsilon_mps: 0.001
+    wheel_mu_longitudinal: 1.2
+    wheel_mu_lateral: 1.0
+    wheel_slip_longitudinal: 0.0001
+    wheel_slip_lateral: 0.0001
+    # Metadata only with the active DART rigid-contact engine.
+    wheel_contact_stiffness: 1000000.0
+    wheel_contact_damping: 100.0
+    terrain_mu_longitudinal: 1.0
+    terrain_mu_lateral: 1.0
 
 # Exact go2w_slope_test.sdf geometry used by the monitor's RAMP_GEOMETRY mapping:
 # angle: lane_y, ramp pose x/z/pitch, platform centre x/z, entry x, top height

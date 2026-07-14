@@ -5,17 +5,57 @@ import os
 from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, TimerAction
+from launch.actions import (
+    DeclareLaunchArgument, EmitEvent, LogInfo, OpaqueFunction,
+    RegisterEventHandler, SetLaunchConfiguration, TimerAction,
+)
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
 from launch.substitutions import LaunchConfiguration
 
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+from quadruped_control.go2w_friction_presets import (
+    ALL_PARAMETERS,
+    load_configuration,
+    resolve_friction,
+)
+
+
+FRICTION_PARAMETERS = ALL_PARAMETERS
+
+
+def _resolve_friction(context, *, preset_file):
+    configuration = load_configuration(preset_file)
+    preset = LaunchConfiguration('friction_preset').perform(context)
+    try:
+        friction = resolve_friction(configuration, preset, {
+            name: LaunchConfiguration(name).perform(context)
+            for name in FRICTION_PARAMETERS
+        })
+    except ValueError as error:
+        raise RuntimeError(str(error)) from error
+    return [
+        *(SetLaunchConfiguration(
+            f'resolved_{name}', str(friction.values[name]),
+        )
+          for name in FRICTION_PARAMETERS),
+        SetLaunchConfiguration(
+            'resolved_effective_friction_label', friction.effective_label,
+        ),
+        LogInfo(msg=(
+            f'Go2-W monitor effective friction metadata: '
+            f'{friction.effective_label}'
+        )),
+    ]
 
 
 def generate_launch_description():
     """Create the monitoring-only launch description."""
     control_share = get_package_share_directory('quadruped_control')
+    go2w_share = get_package_share_directory('unitree_go2w_description')
     config = os.path.join(control_share, 'config', 'go2w_slope_test_monitor.yaml')
+    preset_file = os.path.join(go2w_share, 'config', 'go2w_friction_presets.yaml')
 
     ramp_angle = LaunchConfiguration('ramp_angle_deg')
     lane_y = LaunchConfiguration('lane_y')
@@ -41,8 +81,63 @@ def generate_launch_description():
     gazebo_pose_topic = LaunchConfiguration('gazebo_pose_topic')
     model_pose_index = LaunchConfiguration('ground_truth_model_pose_index')
     spawn_tolerance = LaunchConfiguration('ground_truth_spawn_tolerance_m')
+    friction_preset = LaunchConfiguration('friction_preset')
     pose_array_topic = '/go2w/ground_truth/pose_array'
     odometry_topic = '/go2w/ground_truth/odom'
+    monitor_node = Node(
+        package='quadruped_control',
+        executable='go2w_slope_test_monitor',
+        name='go2w_slope_test_monitor',
+        output='screen',
+        parameters=[
+            config,
+            {
+                'ramp_angle_deg': ParameterValue(ramp_angle, value_type=float),
+                'lane_y': ParameterValue(lane_y, value_type=float),
+                'trial_id': trial_id,
+                'target_speed_mps': ParameterValue(target_speed, value_type=float),
+                'operator_note': operator_note,
+                'log_directory': log_directory,
+                'friction_preset': friction_preset,
+                'effective_friction_label': LaunchConfiguration(
+                    'resolved_effective_friction_label'
+                ),
+                **{
+                    name: ParameterValue(
+                        LaunchConfiguration(f'resolved_{name}'), value_type=float,
+                    )
+                    for name in FRICTION_PARAMETERS
+                },
+                'trial_timeout_sec': ParameterValue(trial_timeout, value_type=float),
+                'auto_stop_logging_on_result': ParameterValue(
+                    auto_stop, value_type=bool,
+                ),
+                'auto_drive_enabled': ParameterValue(auto_drive, value_type=bool),
+                'auto_start': ParameterValue(auto_start, value_type=bool),
+                'acceleration_mps2': ParameterValue(acceleration, value_type=float),
+                'deceleration_mps2': ParameterValue(deceleration, value_type=float),
+                'countdown_sec': ParameterValue(countdown, value_type=float),
+                'precheck_timeout_sec': ParameterValue(
+                    precheck_timeout, value_type=float,
+                ),
+                'expected_start_x_m': ParameterValue(
+                    expected_start_x, value_type=float,
+                ),
+                'expected_start_y_m': ParameterValue(
+                    expected_start_y, value_type=float,
+                ),
+                'expected_start_yaw_deg': ParameterValue(
+                    expected_start_yaw, value_type=float,
+                ),
+                'shutdown_after_result': ParameterValue(
+                    shutdown_after_result, value_type=bool,
+                ),
+                'stop_on_warning': ParameterValue(stop_on_warning, value_type=bool),
+                'odometry_topic': odometry_topic,
+                'use_sim_time': ParameterValue(use_sim_time, value_type=bool),
+            },
+        ],
+    )
 
     return LaunchDescription([
         DeclareLaunchArgument('ramp_angle_deg', default_value='15'),
@@ -51,7 +146,7 @@ def generate_launch_description():
         DeclareLaunchArgument('target_speed_mps', default_value='0.25'),
         DeclareLaunchArgument('operator_note', default_value=''),
         DeclareLaunchArgument(
-            'log_directory', default_value='~/quad_ws/logs/slope_tests',
+            'log_directory', default_value='',
         ),
         DeclareLaunchArgument('trial_timeout_sec', default_value='60.0'),
         DeclareLaunchArgument(
@@ -88,6 +183,26 @@ def generate_launch_description():
             default_value='0.75',
             description='Maximum initial XY error allowed for the selected pose.',
         ),
+        DeclareLaunchArgument(
+            'friction_preset',
+            default_value='dry_concrete',
+            description='Named preset providing defaults; source YAML is read-only.',
+        ),
+        *(
+            DeclareLaunchArgument(
+                name,
+                default_value='',
+                description=(
+                    f'Optional {name} override; explicit zero is valid and takes '
+                    'precedence over the preset.'
+                ),
+            )
+            for name in FRICTION_PARAMETERS
+        ),
+        OpaqueFunction(
+            function=_resolve_friction,
+            kwargs={'preset_file': preset_file},
+        ),
         Node(
             package='ros_gz_bridge',
             executable='parameter_bridge',
@@ -122,57 +237,12 @@ def generate_launch_description():
         ),
         TimerAction(
             period=monitor_start_delay,
-            actions=[Node(
-                package='quadruped_control',
-                executable='go2w_slope_test_monitor',
-                name='go2w_slope_test_monitor',
-                output='screen',
-                parameters=[
-                    config,
-                    {
-                    'ramp_angle_deg': ParameterValue(ramp_angle, value_type=float),
-                    'lane_y': ParameterValue(lane_y, value_type=float),
-                    'trial_id': trial_id,
-                    'target_speed_mps': ParameterValue(target_speed, value_type=float),
-                    'operator_note': operator_note,
-                    'log_directory': log_directory,
-                    'trial_timeout_sec': ParameterValue(trial_timeout, value_type=float),
-                    'auto_stop_logging_on_result': ParameterValue(
-                        auto_stop, value_type=bool,
-                    ),
-                    'auto_drive_enabled': ParameterValue(
-                        auto_drive, value_type=bool,
-                    ),
-                    'auto_start': ParameterValue(auto_start, value_type=bool),
-                    'acceleration_mps2': ParameterValue(
-                        acceleration, value_type=float,
-                    ),
-                    'deceleration_mps2': ParameterValue(
-                        deceleration, value_type=float,
-                    ),
-                    'countdown_sec': ParameterValue(countdown, value_type=float),
-                    'precheck_timeout_sec': ParameterValue(
-                        precheck_timeout, value_type=float,
-                    ),
-                    'expected_start_x_m': ParameterValue(
-                        expected_start_x, value_type=float,
-                    ),
-                    'expected_start_y_m': ParameterValue(
-                        expected_start_y, value_type=float,
-                    ),
-                    'expected_start_yaw_deg': ParameterValue(
-                        expected_start_yaw, value_type=float,
-                    ),
-                    'shutdown_after_result': ParameterValue(
-                        shutdown_after_result, value_type=bool,
-                    ),
-                    'stop_on_warning': ParameterValue(
-                        stop_on_warning, value_type=bool,
-                    ),
-                    'odometry_topic': odometry_topic,
-                    'use_sim_time': ParameterValue(use_sim_time, value_type=bool),
-                    },
-                ],
-            )],
+            actions=[monitor_node],
+        ),
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=monitor_node,
+                on_exit=[EmitEvent(event=Shutdown(reason='slope monitor exited'))],
+            )
         ),
     ])

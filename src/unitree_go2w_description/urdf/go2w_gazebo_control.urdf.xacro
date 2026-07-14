@@ -2,8 +2,58 @@
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="go2w_description">
   <xacro:arg name="base_urdf_file" default="$(find-pkg-share unitree_go2w_description)/urdf/go2w_description.urdf"/>
   <xacro:arg name="controllers_file" default="$(find-pkg-share unitree_go2w_description)/config/go2w_ros2_control.yaml"/>
+  <xacro:arg name="wheel_mu_longitudinal" default="1.2"/>
+  <xacro:arg name="wheel_mu_lateral" default="1.0"/>
+  <xacro:arg name="wheel_slip_longitudinal" default="0.0001"/>
+  <xacro:arg name="wheel_slip_lateral" default="0.0001"/>
 
   <xacro:include filename="$(arg base_urdf_file)"/>
+
+  <!--
+    Gazebo Harmonic's default DART engine reads the ODE-named SDF friction
+    fields below. fdir1 is wheel-local +X (the rolling direction); the second
+    direction is lateral. The launch pipeline adds slip1 / slip2 to the
+    generated SDF because SDFormat's URDF extension does not convert those two
+    fields from a gazebo reference block.
+  -->
+  <xacro:macro name="wheel_contact" params="link_name">
+    <gazebo reference="${link_name}">
+      <mu1>$(arg wheel_mu_longitudinal)</mu1>
+      <mu2>$(arg wheel_mu_lateral)</mu2>
+      <fdir1>1 0 0</fdir1>
+    </gazebo>
+  </xacro:macro>
+
+  <xacro:wheel_contact link_name="FL_foot"/>
+  <xacro:wheel_contact link_name="FR_foot"/>
+  <xacro:wheel_contact link_name="RL_foot"/>
+  <xacro:wheel_contact link_name="RR_foot"/>
+
+  <!-- Ported from the previously working Unitree Go2 Gazebo description. -->
+  <gazebo reference="imu">
+    <sensor name="imu_sensor" type="imu">
+      <always_on>true</always_on>
+      <update_rate>100</update_rate>
+      <visualize>false</visualize>
+      <topic>imu/data</topic>
+      <gz_frame_id>imu</gz_frame_id>
+      <imu>
+        <angular_velocity>
+          <x><noise type="gaussian"><mean>0.0</mean><stddev>2e-4</stddev></noise></x>
+          <y><noise type="gaussian"><mean>0.0</mean><stddev>2e-4</stddev></noise></y>
+          <z><noise type="gaussian"><mean>0.0</mean><stddev>2e-4</stddev></noise></z>
+        </angular_velocity>
+        <linear_acceleration>
+          <x><noise type="gaussian"><mean>0.0</mean><stddev>1.7e-2</stddev></noise></x>
+          <y><noise type="gaussian"><mean>0.0</mean><stddev>1.7e-2</stddev></noise></y>
+          <z><noise type="gaussian"><mean>0.0</mean><stddev>1.7e-2</stddev></noise></z>
+        </linear_acceleration>
+      </imu>
+      <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu">
+        <initial_orientation_as_reference>false</initial_orientation_as_reference>
+      </plugin>
+    </sensor>
+  </gazebo>
 
   <ros2_control name="Go2WGazeboSystem" type="system">
     <hardware>

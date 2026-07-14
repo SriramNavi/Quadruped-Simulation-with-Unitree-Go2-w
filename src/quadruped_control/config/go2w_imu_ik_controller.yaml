@@ -1,0 +1,29 @@
+go2w_imu_ik_controller:
+  ros__parameters:
+    use_sim_time: true
+    mode: shadow
+    enabled_on_start: false
+    imu_topic: /imu/data
+    joint_state_topic: /joint_states
+    expected_imu_frame: imu
+    command_backend: direct_leg_position_controller
+    command_topic: /go2w_leg_position_controller/commands
+    target_pitch_deg: 0.0
+    control_rate_hz: 100.0
+    pitch_filter_cutoff_hz: 5.0
+    kp: 7.0
+    ki: 0.0
+    kd: 0.15
+    integral_limit: 0.20
+    max_body_correction_deg: 15.0
+    max_leg_offset_m: 0.055
+    max_offset_rate_mps: 0.020
+    imu_timeout_sec: 0.20
+    joint_state_timeout_sec: 0.20
+    max_message_dt_sec: 0.10
+    max_roll_deg: 35.0
+    max_pitch_deg: 40.0
+    max_saturation_sec: 3.0
+    max_consecutive_ik_failures: 3
+    workspace_margin_m: 0.00001
+    diagnostics_rate_hz: 1.0

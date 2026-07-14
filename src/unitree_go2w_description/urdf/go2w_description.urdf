@@ -4,6 +4,7 @@
     <inertial>
       <origin xyz="0.021112 0 -0.005366" rpy="0 0 0" />
       <mass value="6.921" />
+      <!-- <mass value="1.921" /> -->
       <inertia ixx="0.02448" ixy="0.00012166" ixz="0.0014849" iyy="0.098077" iyz="-3.12E-05" izz="0.107" />
     </inertial>
     <visual>
@@ -204,9 +205,9 @@
       </material>
     </visual>
     <collision>
-      <origin rpy="0 0 0" xyz="0 0.0 0" />
+      <origin rpy="1.5707963267948966 0 0" xyz="0 0.048092 0" />
       <geometry>
-        <mesh filename="package://unitree_go2w_description/dae/left_wheel.dae" />
+        <cylinder radius="0.086" length="0.052" />
       </geometry>
     </collision>
   </link>
@@ -366,10 +367,9 @@
       </material>
     </visual>
     <collision>
-      <origin rpy="0 0 0" xyz="0 -0.0 0" />
+      <origin rpy="1.5707963267948966 0 0" xyz="0 -0.048092 0" />
       <geometry>
-        <mesh filename="package://unitree_go2w_description/dae/right_wheel.dae" />
-        
+        <cylinder radius="0.086" length="0.052" />
       </geometry>
     </collision>
   </link>
@@ -529,10 +529,9 @@
       </material>
     </visual>
     <collision>
-      <origin rpy="0 0 0" xyz="0 0.0 0" />
+      <origin rpy="1.5707963267948966 0 0" xyz="0 0.048092 0" />
       <geometry>
-        <mesh filename="package://unitree_go2w_description/dae/left_wheel.dae" />
-        
+        <cylinder radius="0.086" length="0.052" />
       </geometry>
     </collision>
   </link>
@@ -691,10 +690,9 @@
       </material>
     </visual>
     <collision>
-      <origin rpy="0 0 0" xyz="0 -0.0 0" />
+      <origin rpy="1.5707963267948966 0 0" xyz="0 -0.048092 0" />
       <geometry>
-        <mesh filename="package://unitree_go2w_description/dae/right_wheel.dae" />
-        
+        <cylinder radius="0.086" length="0.052" />
       </geometry>
     </collision>
   </link>

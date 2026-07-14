@@ -64,7 +64,9 @@
     <!--
       Each 5.0 x 2.5 x 0.12 m ramp is positioned so its lower driving-surface
       edge is at x=1.5, z=0 and it rises toward +X. All contact surfaces use
-      identical mu / mu2 values; only pose and visual identification differ.
+      identical dry-concrete mu / mu2 defaults; go2w_reference.launch.py makes
+      a temporary SDF with preset / launch-argument overrides when this world
+      is selected. Only pose and visual identification differ.
     -->
     <model name="ramp_15_deg">
       <static>true</static>

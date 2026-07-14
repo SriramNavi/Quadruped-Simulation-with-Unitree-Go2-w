@@ -1,0 +1,53 @@
+# Controlled-comparison presets for rigid Coulomb contact. These are not
+# certified material measurements or deformable-terrain models.
+defaults:
+  wheel_slip_longitudinal: 0.0001
+  wheel_slip_lateral: 0.0001
+  # DART uses rigid constraints and does not consume ODE kp / kd. Keep these
+  # values as experiment metadata and for a future ODE-compatible engine.
+  wheel_contact_stiffness: 1000000.0
+  wheel_contact_damping: 100.0
+
+presets:
+  dry_concrete:
+    wheel_mu_longitudinal: 1.2
+    wheel_mu_lateral: 1.0
+    terrain_mu_longitudinal: 1.0
+    terrain_mu_lateral: 1.0
+    wheel_slip_longitudinal: 0.0001
+    wheel_slip_lateral: 0.0001
+  smooth_tile:
+    wheel_mu_longitudinal: 0.8
+    wheel_mu_lateral: 0.7
+    terrain_mu_longitudinal: 0.8
+    terrain_mu_lateral: 0.7
+    wheel_slip_longitudinal: 0.0001
+    wheel_slip_lateral: 0.0001
+  wet_tile:
+    wheel_mu_longitudinal: 0.45
+    wheel_mu_lateral: 0.35
+    terrain_mu_longitudinal: 0.45
+    terrain_mu_lateral: 0.35
+    wheel_slip_longitudinal: 0.0001
+    wheel_slip_lateral: 0.0001
+  loose_soil:
+    wheel_mu_longitudinal: 0.6
+    wheel_mu_lateral: 0.5
+    terrain_mu_longitudinal: 0.6
+    terrain_mu_lateral: 0.5
+    wheel_slip_longitudinal: 0.0001
+    wheel_slip_lateral: 0.0001
+  low_friction:
+    wheel_mu_longitudinal: 0.15
+    wheel_mu_lateral: 0.10
+    terrain_mu_longitudinal: 0.15
+    terrain_mu_lateral: 0.10
+    wheel_slip_longitudinal: 0.0001
+    wheel_slip_lateral: 0.0001
+  zero_friction:
+    wheel_mu_longitudinal: 0.0
+    wheel_mu_lateral: 0.0
+    terrain_mu_longitudinal: 0.0
+    terrain_mu_lateral: 0.0
+    wheel_slip_longitudinal: 0.0
+    wheel_slip_lateral: 0.0

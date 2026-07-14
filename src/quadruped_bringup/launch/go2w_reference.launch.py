@@ -1,15 +1,19 @@
 import os
 
-from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
+from ament_index_python.packages import get_package_share_directory, PackageNotFoundError
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
     IncludeLaunchDescription,
     LogInfo,
+    OpaqueFunction,
+    RegisterEventHandler,
+    SetLaunchConfiguration,
     SetEnvironmentVariable,
     TimerAction,
 )
 from launch.conditions import IfCondition
+from launch.event_handlers import OnShutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import (
     Command,
@@ -20,6 +24,86 @@ from launch.substitutions import (
 )
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+from quadruped_control.go2w_friction_presets import (
+    ALL_PARAMETERS,
+    generate_runtime_descriptions,
+    load_configuration,
+    resolve_friction,
+)
+
+
+FRICTION_PARAMETERS = ALL_PARAMETERS
+
+
+def _configure_contact(
+    context,
+    *,
+    preset_file,
+    control_xacro_path,
+    urdf_path,
+    controllers_path,
+):
+    """Resolve contact parameters and render isolated runtime descriptions."""
+    configuration = load_configuration(preset_file)
+    preset_name = LaunchConfiguration("friction_preset").perform(context)
+    overrides = {
+        name: LaunchConfiguration(name).perform(context)
+        for name in FRICTION_PARAMETERS
+    }
+    try:
+        friction = resolve_friction(configuration, preset_name, overrides)
+    except ValueError as error:
+        raise RuntimeError(str(error)) from error
+    values = friction.values
+
+    actions = [
+        SetLaunchConfiguration(f"resolved_{name}", str(values[name]))
+        for name in FRICTION_PARAMETERS
+    ]
+    actions.append(SetLaunchConfiguration("resolved_friction_preset", preset_name))
+
+    try:
+        runtime = generate_runtime_descriptions(
+            friction=friction,
+            source_world=LaunchConfiguration("world").perform(context),
+            control_xacro=control_xacro_path,
+            source_urdf=urdf_path,
+            controllers_file=controllers_path,
+            ramp_angle_deg=15.0,
+        )
+    except (OSError, ValueError) as error:
+        raise RuntimeError(str(error)) from error
+    actions.extend((
+        SetLaunchConfiguration("world", str(runtime.world_sdf)),
+        SetLaunchConfiguration("generated_contact_robot", str(runtime.robot_sdf)),
+        SetLaunchConfiguration("generated_contact_world", str(runtime.world_sdf)),
+        SetLaunchConfiguration("generated_contact_directory", str(runtime.directory)),
+        SetLaunchConfiguration(
+            "effective_friction_snapshot", str(runtime.effective_parameters),
+        ),
+        LogInfo(msg=(
+            f"Selected friction preset: {preset_name}\n"
+            f"Effective wheel mu: longitudinal={values['wheel_mu_longitudinal']} "
+            f"lateral={values['wheel_mu_lateral']}\n"
+            f"Effective terrain mu: longitudinal={values['terrain_mu_longitudinal']} "
+            f"lateral={values['terrain_mu_lateral']}\n"
+            f"Effective wheel slip: longitudinal={values['wheel_slip_longitudinal']} "
+            f"lateral={values['wheel_slip_lateral']}\n"
+            f"Runtime robot SDF: {runtime.robot_sdf}\n"
+            f"Runtime world SDF: {runtime.world_sdf}\n"
+            f"Effective parameter snapshot: {runtime.effective_parameters}"
+        )),
+    ))
+    return actions
+
+
+def _remove_generated_files(context):
+    """Remove this launch's uniquely owned runtime directory."""
+    import shutil
+
+    path = LaunchConfiguration("generated_contact_directory").perform(context)
+    if path:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def package_available(package_name):
@@ -39,6 +123,7 @@ def generate_launch_description():
     urdf_path = os.path.join(go2w_share, "urdf", "go2w_description.urdf")
     control_xacro_path = os.path.join(go2w_share, "urdf", "go2w_gazebo_control.urdf.xacro")
     controllers_path = os.path.join(go2w_share, "config", "go2w_ros2_control.yaml")
+    preset_file = os.path.join(go2w_share, "config", "go2w_friction_presets.yaml")
     rviz_config = os.path.join(go2w_share, "rviz", "go2w.rviz")
     gazebo_resource_root = os.path.dirname(go2w_share)
 
@@ -79,6 +164,18 @@ def generate_launch_description():
         " ",
         "controllers_file:=",
         controllers_path,
+        " ",
+        "wheel_mu_longitudinal:=",
+        LaunchConfiguration("resolved_wheel_mu_longitudinal"),
+        " ",
+        "wheel_mu_lateral:=",
+        LaunchConfiguration("resolved_wheel_mu_lateral"),
+        " ",
+        "wheel_slip_longitudinal:=",
+        LaunchConfiguration("resolved_wheel_slip_longitudinal"),
+        " ",
+        "wheel_slip_lateral:=",
+        LaunchConfiguration("resolved_wheel_slip_lateral"),
     ])
 
     robot_description_param = {
@@ -112,14 +209,18 @@ def generate_launch_description():
                 arguments=[
                     "-name",
                     LaunchConfiguration("robot_name"),
-                    "-topic",
-                    "robot_description",
+                    "-file",
+                    LaunchConfiguration("generated_contact_robot"),
                     "-x",
                     LaunchConfiguration("world_init_x"),
                     "-y",
                     LaunchConfiguration("world_init_y"),
                     "-z",
                     LaunchConfiguration("world_init_z"),
+                    "-R",
+                    LaunchConfiguration("spawn_roll"),
+                    "-P",
+                    LaunchConfiguration("spawn_pitch"),
                     "-Y",
                     LaunchConfiguration("world_init_heading"),
                 ],
@@ -129,7 +230,7 @@ def generate_launch_description():
     )
 
     spawn_manual_controllers = TimerAction(
-        period=8.0,
+        period=4.5,
         actions=[
             Node(
                 package="controller_manager",
@@ -177,7 +278,29 @@ def generate_launch_description():
         DeclareLaunchArgument("spawn_x", default_value="-3.0", description="Initial x position."),
         DeclareLaunchArgument("spawn_y", default_value="-6.0", description="Initial y position."),
         DeclareLaunchArgument("spawn_z", default_value="0.45", description="Initial z position."),
+        DeclareLaunchArgument("spawn_roll", default_value="0.0", description="Initial roll."),
+        DeclareLaunchArgument("spawn_pitch", default_value="0.0", description="Initial pitch."),
         DeclareLaunchArgument("spawn_yaw", default_value="0.0", description="Initial yaw."),
+        DeclareLaunchArgument(
+            "friction_preset",
+            default_value="dry_concrete",
+            description=(
+                "Named preset providing defaults; source YAML is read-only and "
+                "runtime descriptions are generated under /tmp."
+            ),
+        ),
+        *(
+            DeclareLaunchArgument(
+                name,
+                default_value="",
+                description=(
+                    f"Optional {name} override; empty uses the preset, while an "
+                    "explicit zero is valid and takes precedence. Source files "
+                    "are not modified."
+                ),
+            )
+            for name in FRICTION_PARAMETERS
+        ),
         DeclareLaunchArgument(
             "world_init_x",
             default_value=LaunchConfiguration("spawn_x"),
@@ -197,6 +320,18 @@ def generate_launch_description():
             "world_init_heading",
             default_value=LaunchConfiguration("spawn_yaw"),
             description="Legacy alias for spawn_yaw.",
+        ),
+        OpaqueFunction(
+            function=_configure_contact,
+            kwargs={
+                "preset_file": preset_file,
+                "control_xacro_path": control_xacro_path,
+                "urdf_path": urdf_path,
+                "controllers_path": controllers_path,
+            },
+        ),
+        RegisterEventHandler(
+            OnShutdown(on_shutdown=[OpaqueFunction(function=_remove_generated_files)])
         ),
         LogInfo(msg="Go2-W reference launch: Gazebo manual mode starts controllers but no motion commands."),
         SetEnvironmentVariable(
@@ -241,9 +376,13 @@ def generate_launch_description():
         Node(
             package="ros_gz_bridge",
             executable="parameter_bridge",
-            name="go2w_clock_bridge",
+            name="go2w_gazebo_bridge",
             output="screen",
-            arguments=["/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock"],
+            parameters=[{"use_sim_time": use_sim_time}],
+            arguments=[
+                "/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock",
+                "/imu/data@sensor_msgs/msg/Imu[gz.msgs.IMU",
+            ],
             condition=IfCondition(gazebo),
         ),
         spawn_go2w,

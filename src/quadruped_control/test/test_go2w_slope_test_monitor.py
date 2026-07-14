@@ -28,6 +28,7 @@ from quadruped_control.go2w_slope_test_monitor import (
     rate_limited_speed,
     ros_timeout_elapsed,
     warning_threshold_active,
+    wheel_slip_values,
 )
 
 
@@ -69,6 +70,8 @@ def valid_precheck_sample(**overrides) -> PrecheckSample:
         'joint_states_valid': True,
         'odometry_fresh': True,
         'joint_states_fresh': True,
+        'imu_valid': True,
+        'imu_fresh': True,
         'cmd_vel_subscriber_count': 1,
         'emergency_stop_active': False,
         'base_x_m': -3.0,
@@ -99,6 +102,7 @@ def safety_reason(**overrides) -> str:
     values = {
         'odometry_fresh': True,
         'joint_states_fresh': True,
+        'imu_fresh': True,
         'cmd_vel_subscriber_available': True,
         'require_cmd_vel_subscriber': True,
         'lane_error_m': 0.0,
@@ -208,12 +212,14 @@ def test_multiple_precheck_blockers_are_reported_independently() -> None:
     sample = valid_precheck_sample(
         odometry_valid=False,
         joint_states_valid=False,
+        imu_valid=False,
         cmd_vel_subscriber_count=0,
         emergency_stop_active=True,
     )
     assert precheck_blockers(sample, precheck_config()) == (
         'WAITING_FOR_ODOMETRY',
         'WAITING_FOR_JOINT_STATES',
+        'WAITING_FOR_IMU',
         'EMERGENCY_STOP_ACTIVE',
         'CMD_VEL_NO_SUBSCRIBER',
     )
@@ -249,6 +255,13 @@ def test_missing_joint_states_at_startup_is_recoverable() -> None:
         valid_precheck_sample(joint_states_valid=False), precheck_config(),
     )
     assert blockers == ('WAITING_FOR_JOINT_STATES',)
+
+
+def test_missing_imu_at_startup_blocks_automation() -> None:
+    blockers = precheck_blockers(
+        valid_precheck_sample(imu_valid=False), precheck_config(),
+    )
+    assert blockers == ('WAITING_FOR_IMU',)
 
 
 def test_precheck_timeout_default_is_loaded_from_yaml() -> None:
@@ -307,6 +320,10 @@ def test_stale_joint_states_request_abort() -> None:
     assert safety_reason(joint_states_fresh=False) == 'JOINT_STATES_TIMEOUT'
 
 
+def test_stale_imu_requests_abort() -> None:
+    assert safety_reason(imu_fresh=False) == 'IMU_TIMEOUT'
+
+
 def test_success_deceleration_starts_before_safe_platform_end_limit() -> None:
     geometry = RAMP_GEOMETRY[15]
     start_x = calculate_deceleration_start_x(geometry, 0.25, 0.35, 0.50)
@@ -354,3 +371,31 @@ def test_passive_mode_command_path_is_explicitly_disabled() -> None:
     )
     Go2WSlopeTestMonitor._publish_drive_command(fake_monitor, 0.25)
     fake_monitor.command_publisher.publish.assert_not_called()
+
+
+def test_wheel_slip_is_zero_for_pure_rolling() -> None:
+    omega = 0.25 / 0.086
+    normalized, tread, slip, average = wheel_slip_values(
+        [omega] * 4, [1.0] * 4, 0.086, 0.25,
+    )
+    assert normalized == pytest.approx([omega] * 4)
+    assert tread == pytest.approx([0.25] * 4)
+    assert slip == pytest.approx([0.0] * 4)
+    assert average == pytest.approx(0.0)
+
+
+def test_wheel_slip_sign_and_joint_sign_normalization() -> None:
+    _, _, slip, average = wheel_slip_values(
+        [4.0, -4.0, 4.0, -4.0], [1.0, -1.0, 1.0, -1.0],
+        0.086, 0.172,
+    )
+    assert slip == pytest.approx([0.5] * 4)
+    assert average == pytest.approx(0.5)
+
+
+def test_wheel_slip_is_finite_at_standstill() -> None:
+    _, _, slip, average = wheel_slip_values(
+        [0.0] * 4, [1.0] * 4, 0.086, 0.0,
+    )
+    assert slip == pytest.approx([0.0] * 4)
+    assert average == pytest.approx(0.0)
