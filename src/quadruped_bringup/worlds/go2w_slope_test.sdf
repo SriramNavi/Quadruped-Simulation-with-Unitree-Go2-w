@@ -62,19 +62,22 @@
     </model>
 
     <!--
-      Each 5.0 x 2.5 x 0.12 m ramp is positioned so its lower driving-surface
-      edge is at x=1.5, z=0 and it rises toward +X. All contact surfaces use
-      identical dry-concrete mu / mu2 defaults; go2w_reference.launch.py makes
-      a temporary SDF with preset / launch-argument overrides when this world
-      is selected. Only pose and visual identification differ.
+      Each watertight mesh starts at x=1.5, z=0 and combines a quintic-angle
+      entry, an exact 5 m constant slope, a quintic-angle crest, and a 2 m
+      horizontal top. All contact surfaces retain the original dry-concrete
+      mu / mu2 defaults; go2w_reference.launch.py applies runtime overrides.
+      Meshes are reproducible with scripts/generate_curved_ramps.py.
     -->
     <model name="ramp_15_deg">
       <static>true</static>
-      <pose>3.9303437084 -6.0 0.5890920632 0 -0.2617993878 0</pose>
+      <pose>1.5 -6.0 0 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry>
-            <box><size>5.0 2.5 0.12</size></box>
+            <mesh>
+              <uri>package://quadruped_bringup/worlds/go2w_curved_ramp_15.obj</uri>
+              <scale>1 1 1</scale>
+            </mesh>
           </geometry>
           <surface>
             <friction>
@@ -84,34 +87,10 @@
         </collision>
         <visual name="visual">
           <geometry>
-            <box><size>5.0 2.5 0.12</size></box>
-          </geometry>
-          <material>
-            <ambient>0.08 0.25 0.85 1</ambient>
-            <diffuse>0.08 0.25 0.85 1</diffuse>
-            <specular>0.2 0.2 0.2 1</specular>
-          </material>
-        </visual>
-      </link>
-    </model>
-
-    <model name="platform_15_deg">
-      <static>true</static>
-      <pose>7.3096291314 -6.0 1.2340952255 0 0 0</pose>
-      <link name="link">
-        <collision name="collision">
-          <geometry>
-            <box><size>2.0 2.5 0.12</size></box>
-          </geometry>
-          <surface>
-            <friction>
-              <ode><mu>1.0</mu><mu2>1.0</mu2></ode>
-            </friction>
-          </surface>
-        </collision>
-        <visual name="visual">
-          <geometry>
-            <box><size>2.0 2.5 0.12</size></box>
+            <mesh>
+              <uri>package://quadruped_bringup/worlds/go2w_curved_ramp_15.obj</uri>
+              <scale>1 1 1</scale>
+            </mesh>
           </geometry>
           <material>
             <ambient>0.08 0.25 0.85 1</ambient>
@@ -124,11 +103,14 @@
 
     <model name="ramp_30_deg">
       <static>true</static>
-      <pose>3.6950635095 -2.0 1.1980384758 0 -0.5235987756 0</pose>
+      <pose>1.5 -2.0 0 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry>
-            <box><size>5.0 2.5 0.12</size></box>
+            <mesh>
+              <uri>package://quadruped_bringup/worlds/go2w_curved_ramp_30.obj</uri>
+              <scale>1 1 1</scale>
+            </mesh>
           </geometry>
           <surface>
             <friction>
@@ -138,34 +120,10 @@
         </collision>
         <visual name="visual">
           <geometry>
-            <box><size>5.0 2.5 0.12</size></box>
-          </geometry>
-          <material>
-            <ambient>0.08 0.65 0.18 1</ambient>
-            <diffuse>0.08 0.65 0.18 1</diffuse>
-            <specular>0.2 0.2 0.2 1</specular>
-          </material>
-        </visual>
-      </link>
-    </model>
-
-    <model name="platform_30_deg">
-      <static>true</static>
-      <pose>6.8101270189 -2.0 2.4400000000 0 0 0</pose>
-      <link name="link">
-        <collision name="collision">
-          <geometry>
-            <box><size>2.0 2.5 0.12</size></box>
-          </geometry>
-          <surface>
-            <friction>
-              <ode><mu>1.0</mu><mu2>1.0</mu2></ode>
-            </friction>
-          </surface>
-        </collision>
-        <visual name="visual">
-          <geometry>
-            <box><size>2.0 2.5 0.12</size></box>
+            <mesh>
+              <uri>package://quadruped_bringup/worlds/go2w_curved_ramp_30.obj</uri>
+              <scale>1 1 1</scale>
+            </mesh>
           </geometry>
           <material>
             <ambient>0.08 0.65 0.18 1</ambient>
@@ -178,11 +136,14 @@
 
     <model name="ramp_35_deg">
       <static>true</static>
-      <pose>3.5822946969 2.0 1.3847919682 0 -0.6108652382 0</pose>
+      <pose>1.5 2.0 0 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry>
-            <box><size>5.0 2.5 0.12</size></box>
+            <mesh>
+              <uri>package://quadruped_bringup/worlds/go2w_curved_ramp_35.obj</uri>
+              <scale>1 1 1</scale>
+            </mesh>
           </geometry>
           <surface>
             <friction>
@@ -192,34 +153,10 @@
         </collision>
         <visual name="visual">
           <geometry>
-            <box><size>5.0 2.5 0.12</size></box>
-          </geometry>
-          <material>
-            <ambient>1.0 0.45 0.04 1</ambient>
-            <diffuse>1.0 0.45 0.04 1</diffuse>
-            <specular>0.2 0.2 0.2 1</specular>
-          </material>
-        </visual>
-      </link>
-    </model>
-
-    <model name="platform_35_deg">
-      <static>true</static>
-      <pose>6.5757602214 2.0 2.8078821818 0 0 0</pose>
-      <link name="link">
-        <collision name="collision">
-          <geometry>
-            <box><size>2.0 2.5 0.12</size></box>
-          </geometry>
-          <surface>
-            <friction>
-              <ode><mu>1.0</mu><mu2>1.0</mu2></ode>
-            </friction>
-          </surface>
-        </collision>
-        <visual name="visual">
-          <geometry>
-            <box><size>2.0 2.5 0.12</size></box>
+            <mesh>
+              <uri>package://quadruped_bringup/worlds/go2w_curved_ramp_35.obj</uri>
+              <scale>1 1 1</scale>
+            </mesh>
           </geometry>
           <material>
             <ambient>1.0 0.45 0.04 1</ambient>
@@ -232,11 +169,14 @@
 
     <model name="ramp_45_deg">
       <static>true</static>
-      <pose>3.3101933598 6.0 1.7253405461 0 -0.7853981634 0</pose>
+      <pose>1.5 6.0 0 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry>
-            <box><size>5.0 2.5 0.12</size></box>
+            <mesh>
+              <uri>package://quadruped_bringup/worlds/go2w_curved_ramp_45.obj</uri>
+              <scale>1 1 1</scale>
+            </mesh>
           </geometry>
           <surface>
             <friction>
@@ -246,34 +186,10 @@
         </collision>
         <visual name="visual">
           <geometry>
-            <box><size>5.0 2.5 0.12</size></box>
-          </geometry>
-          <material>
-            <ambient>0.85 0.06 0.06 1</ambient>
-            <diffuse>0.85 0.06 0.06 1</diffuse>
-            <specular>0.2 0.2 0.2 1</specular>
-          </material>
-        </visual>
-      </link>
-    </model>
-
-    <model name="platform_45_deg">
-      <static>true</static>
-      <pose>6.0155339059 6.0 3.4755339059 0 0 0</pose>
-      <link name="link">
-        <collision name="collision">
-          <geometry>
-            <box><size>2.0 2.5 0.12</size></box>
-          </geometry>
-          <surface>
-            <friction>
-              <ode><mu>1.0</mu><mu2>1.0</mu2></ode>
-            </friction>
-          </surface>
-        </collision>
-        <visual name="visual">
-          <geometry>
-            <box><size>2.0 2.5 0.12</size></box>
+            <mesh>
+              <uri>package://quadruped_bringup/worlds/go2w_curved_ramp_45.obj</uri>
+              <scale>1 1 1</scale>
+            </mesh>
           </geometry>
           <material>
             <ambient>0.85 0.06 0.06 1</ambient>

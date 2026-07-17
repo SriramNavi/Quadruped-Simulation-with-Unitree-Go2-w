@@ -74,6 +74,16 @@ def _assert_robot(runtime, expected):
         ]
         assert float(ode.findtext('slip2')) == expected['wheel_slip_lateral']
     assert root.find(".//sensor[@name='imu_sensor']") is not None
+    control_plugin = root.find(
+        ".//plugin[@name='gz_ros2_control::GazeboSimROS2ControlPlugin']"
+    )
+    assert control_plugin is not None
+    assert control_plugin.findtext('controller_manager_name') == (
+        'go2w_controller_manager'
+    )
+    assert control_plugin.findtext('ros/remapping') == (
+        '/robot_description:=/go2w/robot_description'
+    )
 
 
 def _assert_world(runtime, expected):
@@ -145,6 +155,10 @@ def test_generation_is_unique_correct_and_source_immutable():
             assert explicit_zero.friction.values[name] == 0.0
         launch_text = LAUNCH.read_text(encoding='utf-8')
         assert '/imu/data@sensor_msgs/msg/Imu[gz.msgs.IMU' in launch_text
+        assert 'GO2W_CONTROLLER_MANAGER = "/go2w_controller_manager"' in (
+            launch_text
+        )
+        assert 'GO2W_ROBOT_DESCRIPTION_TOPIC = ' in launch_text
         assert _hashes() == before
     finally:
         directories = [runtime.directory for runtime in runtimes]

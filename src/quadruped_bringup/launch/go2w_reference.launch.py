@@ -33,6 +33,8 @@ from quadruped_control.go2w_friction_presets import (
 
 
 FRICTION_PARAMETERS = ALL_PARAMETERS
+GO2W_CONTROLLER_MANAGER = "/go2w_controller_manager"
+GO2W_ROBOT_DESCRIPTION_TOPIC = "/go2w/robot_description"
 
 
 def _configure_contact(
@@ -125,7 +127,8 @@ def generate_launch_description():
     controllers_path = os.path.join(go2w_share, "config", "go2w_ros2_control.yaml")
     preset_file = os.path.join(go2w_share, "config", "go2w_friction_presets.yaml")
     rviz_config = os.path.join(go2w_share, "rviz", "go2w.rviz")
-    gazebo_resource_root = os.path.dirname(go2w_share)
+    bringup_resource_root = os.path.dirname(bringup_share)
+    go2w_resource_root = os.path.dirname(go2w_share)
 
     gazebo = LaunchConfiguration("gazebo")
     gui = LaunchConfiguration("gui")
@@ -241,7 +244,7 @@ def generate_launch_description():
                     "go2w_wheel_velocity_controller",
                     "go2w_leg_position_controller",
                     "--controller-manager",
-                    "/controller_manager",
+                    GO2W_CONTROLLER_MANAGER,
                     "--controller-manager-timeout",
                     "60",
                     "--switch-timeout",
@@ -337,7 +340,9 @@ def generate_launch_description():
         SetEnvironmentVariable(
             name="GZ_SIM_RESOURCE_PATH",
             value=[
-                gazebo_resource_root,
+                bringup_resource_root,
+                ":",
+                go2w_resource_root,
                 ":",
                 EnvironmentVariable("GZ_SIM_RESOURCE_PATH", default_value=""),
             ],
@@ -351,8 +356,12 @@ def generate_launch_description():
         Node(
             package="robot_state_publisher",
             executable="robot_state_publisher",
+            name="go2w_robot_state_publisher",
             output="screen",
             parameters=[robot_description_param],
+            remappings=[
+                ("robot_description", GO2W_ROBOT_DESCRIPTION_TOPIC),
+            ],
         ),
         Node(
             package="joint_state_publisher",

@@ -2,6 +2,8 @@
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="go2w_description">
   <xacro:arg name="base_urdf_file" default="$(find-pkg-share unitree_go2w_description)/urdf/go2w_description.urdf"/>
   <xacro:arg name="controllers_file" default="$(find-pkg-share unitree_go2w_description)/config/go2w_ros2_control.yaml"/>
+  <xacro:arg name="controller_manager_name" default="go2w_controller_manager"/>
+  <xacro:arg name="robot_description_topic" default="/go2w/robot_description"/>
   <xacro:arg name="wheel_mu_longitudinal" default="1.2"/>
   <xacro:arg name="wheel_mu_lateral" default="1.0"/>
   <xacro:arg name="wheel_slip_longitudinal" default="0.0001"/>
@@ -277,9 +279,12 @@
   <gazebo>
     <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
       <parameters>$(arg controllers_file)</parameters>
-      <controller_manager_name>controller_manager</controller_manager_name>
+      <controller_manager_name>$(arg controller_manager_name)</controller_manager_name>
       <hold_joints>true</hold_joints>
       <position_proportional_gain>0.1</position_proportional_gain>
+      <ros>
+        <remapping>/robot_description:=$(arg robot_description_topic)</remapping>
+      </ros>
     </plugin>
   </gazebo>
 </robot>

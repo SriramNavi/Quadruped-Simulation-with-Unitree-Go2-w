@@ -10,8 +10,6 @@ approximation; it does not claim to apply the optimized torques.
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass, fields
-from datetime import datetime, timezone
 import json
 import math
 import os
@@ -20,42 +18,45 @@ import signal
 import subprocess
 import sys
 import time
+from dataclasses import dataclass, fields
+from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 import xml.etree.ElementTree as ET
 
-from controller_manager_msgs.srv import (
-    ListControllers,
-    ListHardwareInterfaces,
-)
-from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
-from geometry_msgs.msg import PoseArray, Vector3
-from nav_msgs.msg import Odometry
 import numpy as np
 import osqp
 import pinocchio as pin
-import rclpy
-from rclpy.node import Node
-from rclpy.parameter import Parameter
-from rclpy.signals import SignalHandlerOptions
 from scipy import sparse
-from sensor_msgs.msg import Imu, JointState
-from std_msgs.msg import Bool, Float64, Float64MultiArray, String, UInt32
-from std_srvs.srv import Trigger
 
 # Make package imports work when this source file is executed directly.
 _PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 if str(_PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(_PACKAGE_ROOT))
 
-from quadruped_control.go2w_dynamic_models import (  # noqa: E402,I100
+from controller_manager_msgs.srv import (  # noqa: E402
+    ListControllers,
+    ListHardwareInterfaces,
+)
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue  # noqa: E402
+from geometry_msgs.msg import PoseArray, Vector3  # noqa: E402
+from nav_msgs.msg import Odometry  # noqa: E402
+import rclpy  # noqa: E402
+from rclpy.node import Node  # noqa: E402
+from rclpy.parameter import Parameter  # noqa: E402
+from rclpy.signals import SignalHandlerOptions  # noqa: E402
+from sensor_msgs.msg import Imu, JointState  # noqa: E402
+from std_msgs.msg import Bool, Float64, Float64MultiArray, String, UInt32  # noqa: E402
+from std_srvs.srv import Trigger  # noqa: E402
+
+from quadruped_control.go2w_dynamic_models import (  # noqa: E402
     ContactPhase,
     TerrainEstimate,
 )
-from quadruped_control.go2w_stability_supervisor import (  # noqa: E402,I100
+from quadruped_control.go2w_stability_supervisor import (  # noqa: E402
     TractionConfig,
     TractionSupervisor,
 )
-from quadruped_control.go2w_terrain_estimator import (  # noqa: E402,I100
+from quadruped_control.go2w_terrain_estimator import (  # noqa: E402
     TerrainEstimator,
     TerrainEstimatorConfig,
 )
@@ -79,17 +80,6 @@ ACTUATED_JOINT_NAMES = tuple(
 MAX_BOUND = 1.0e20
 GRAVITY = 9.81
 
-# NO_CORRECTION_NEEDED: no orientation correction above deadband was requested.
-# ACCEPTED: the requested correction was accepted normally.
-# DEGRADED: a safe nonzero reduced-authority correction was accepted.
-# REJECTED/HARD_REJECTED: no acceptable nonzero correction was selected and the
-# fallback command was used; HARD_REJECTED records a hard-policy exceedance.
-IK_RESIDUAL_NO_CORRECTION_NEEDED = 'NO_CORRECTION_NEEDED'
-IK_RESIDUAL_ACCEPTED = 'ACCEPTED'
-IK_RESIDUAL_DEGRADED = 'DEGRADED'
-IK_RESIDUAL_REJECTED = 'REJECTED'
-IK_RESIDUAL_HARD_REJECTED = 'HARD_REJECTED'
-
 
 def finite(*values: Any) -> bool:
     """Return true when every scalar/array value is finite."""
@@ -105,11 +95,6 @@ def rate_limit(current: float, target: float, limit_per_sec: float, dt: float) -
     """Apply a symmetric first-order rate limit."""
     step = max(0.0, limit_per_sec) * max(0.0, dt)
     return current + clamp(target - current, -step, step)
-
-
-def wrap_to_pi(angle: float) -> float:
-    """Wrap one angle to [-pi, pi]."""
-    return math.atan2(math.sin(angle), math.cos(angle))
 
 
 def quaternion_to_rpy(quaternion: Sequence[float]) -> tuple[float, float, float]:
@@ -144,11 +129,8 @@ class WbcConfig:
     backend: str = 'shadow'
     auto_start: bool = False
     control_rate_hz: float = 100.0
-    # commanded_speed_mps: float = 0.08
-    commanded_speed_mps: float = 0.2
-    desired_level_roll_deg: float = 0.0
+    commanded_speed_mps: float = 0.08
     desired_level_pitch_deg: float = 0.0
-    desired_level_yaw_deg: float = 0.0
     maximum_slope_deg: float = 45.0
     friction_mu_longitudinal: float = 1.2
     friction_mu_lateral: float = 1.0
@@ -165,16 +147,10 @@ class WbcConfig:
     com_kd: float = 7.0
     orientation_kp: float = 45.0
     orientation_kd: float = 10.0
-    orientation_deadband_deg: float = 0.15
-    maximum_orientation_error_deg: float = 20.0
-    maximum_base_angular_accel_radps2: float = 10.0
     posture_kp: float = 20.0
     posture_kd: float = 5.0
     rolling_constraint_weight: float = 35.0
     base_orientation_weight: float = 900.0
-    orientation_roll_weight_scale: float = 1.5
-    orientation_pitch_weight_scale: float = 1.5
-    orientation_yaw_weight_scale: float = 0.35
     com_weight: float = 650.0
     speed_weight: float = 100.0
     posture_weight: float = 18.0
@@ -212,58 +188,11 @@ class WbcConfig:
     controller_manager_name: str = '/controller_manager'
     controller_poll_period_sec: float = 0.25
     max_leg_position_step_rad: float = 0.020
-    hybrid_leveling_enabled: bool = True
-    hybrid_leveling_gain: float = 0.35
-    hybrid_leveling_damping: float = 0.03
-    maximum_leveling_orientation_step_deg: float = 0.35
-    maximum_leveling_joint_correction_rad: float = 0.20
-    maximum_leveling_joint_step_rad: float = 0.006
-    hybrid_leveling_roll_scale: float = 1.0
-    hybrid_leveling_pitch_scale: float = 1.0
-    hybrid_leveling_yaw_scale: float = 0.25
-    hybrid_leveling_leg_yaw_scale: float = 0.0
-    hybrid_leveling_contact_normal_weight: float = 1.0
-    hybrid_leveling_contact_lateral_weight: float = 1.0
-    hybrid_leveling_contact_tangent_weight: float = 0.25
-    hybrid_leveling_axis_dominance_ratio: float = 2.0
-    hybrid_leveling_axis_deadband_deg: float = 0.15
-    hybrid_leveling_pitch_hip_weight: float = 50.0
-    hybrid_leveling_pitch_thigh_weight: float = 1.0
-    hybrid_leveling_pitch_calf_weight: float = 1.0
-    hybrid_leveling_roll_hip_weight: float = 2.0
-    hybrid_leveling_roll_thigh_weight: float = 1.0
-    hybrid_leveling_roll_calf_weight: float = 1.0
-    hybrid_leveling_yaw_hip_weight: float = 20.0
-    hybrid_leveling_yaw_thigh_weight: float = 10.0
-    hybrid_leveling_yaw_calf_weight: float = 10.0
-    hybrid_leveling_mixed_hip_weight: float = 8.0
-    hybrid_leveling_mixed_thigh_weight: float = 1.5
-    hybrid_leveling_mixed_calf_weight: float = 1.5
-    hybrid_leveling_pitch_max_hip_fraction: float = 0.10
-    hybrid_leveling_pitch_emergency_hip_rad: float = 0.0
-    maximum_roll_hip_correction_rad: float = 0.08
-    hybrid_leveling_wbc_target_weight: float = 0.5
-    hybrid_leveling_joint_limit_avoidance_weight: float = 1.0
-    hybrid_leveling_max_iterations: int = 4
-    hybrid_leveling_contact_tolerance_m: float = 0.0015
-    hybrid_leveling_contact_soft_limit_m: float = 0.0025
-    hybrid_leveling_contact_hard_limit_m: float = 0.0040
-    hybrid_leveling_residual_failure_cycles: int = 20
-    hybrid_leveling_backtracking_factor: float = 0.5
-    hybrid_leveling_max_backtracking_steps: int = 4
-    hybrid_ik_speed_reduction_enabled: bool = True
-    hybrid_ik_speed_soft_residual_m: float = 0.0025
-    hybrid_ik_speed_hard_residual_m: float = 0.0040
-    hybrid_ik_minimum_speed_scale: float = 0.40
-    normal_force_validation_tolerance_n: float = 0.025
-    friction_validation_tolerance_n: float = 0.015
-    torque_validation_tolerance_nm: float = 0.015
     virtual_leg_stiffness_nm_rad: float = 100.0
     joint_limit_margin_rad: float = 0.025
     velocity_lookahead_sec: float = 0.050
     contact_force_rate_limit_nps: float = 1400.0
     maximum_wheel_speed_radps: float = 10.0
-    maximum_reverse_stabilization_wheel_speed_radps: float = 0.75
     maximum_com_accel_mps2: float = 2.5
     maximum_roll_deg: float = 35.0
     maximum_pitch_deg: float = 65.0
@@ -330,19 +259,6 @@ class WbcConfig:
             'normal_force_max_n': self.normal_force_max_n,
             'max_joint_accel_radps2': self.max_joint_accel_radps2,
             'max_wheel_accel_radps2': self.max_wheel_accel_radps2,
-            'maximum_orientation_error_deg': (
-                self.maximum_orientation_error_deg
-            ),
-            'maximum_base_angular_accel_radps2': (
-                self.maximum_base_angular_accel_radps2
-            ),
-            'orientation_roll_weight_scale': (
-                self.orientation_roll_weight_scale
-            ),
-            'orientation_pitch_weight_scale': (
-                self.orientation_pitch_weight_scale
-            ),
-            'orientation_yaw_weight_scale': self.orientation_yaw_weight_scale,
             'solver_eps_abs': self.solver_eps_abs,
             'solver_eps_rel': self.solver_eps_rel,
             'solver_time_limit_sec': self.solver_time_limit_sec,
@@ -350,110 +266,9 @@ class WbcConfig:
             'pose_timeout_sec': self.pose_timeout_sec,
             'imu_timeout_sec': self.imu_timeout_sec,
             'joint_timeout_sec': self.joint_timeout_sec,
-            'hybrid_leveling_gain': self.hybrid_leveling_gain,
-            'hybrid_leveling_damping': self.hybrid_leveling_damping,
-            'maximum_leveling_orientation_step_deg': (
-                self.maximum_leveling_orientation_step_deg
-            ),
-            'maximum_leveling_joint_correction_rad': (
-                self.maximum_leveling_joint_correction_rad
-            ),
-            'maximum_leveling_joint_step_rad': (
-                self.maximum_leveling_joint_step_rad
-            ),
-            'hybrid_leveling_roll_scale': self.hybrid_leveling_roll_scale,
-            'hybrid_leveling_pitch_scale': self.hybrid_leveling_pitch_scale,
-            'hybrid_leveling_yaw_scale': self.hybrid_leveling_yaw_scale,
-            'hybrid_leveling_contact_normal_weight': (
-                self.hybrid_leveling_contact_normal_weight
-            ),
-            'hybrid_leveling_contact_lateral_weight': (
-                self.hybrid_leveling_contact_lateral_weight
-            ),
-            'hybrid_leveling_contact_tangent_weight': (
-                self.hybrid_leveling_contact_tangent_weight
-            ),
-            'hybrid_leveling_axis_dominance_ratio': (
-                self.hybrid_leveling_axis_dominance_ratio
-            ),
-            'hybrid_leveling_pitch_hip_weight': (
-                self.hybrid_leveling_pitch_hip_weight
-            ),
-            'hybrid_leveling_pitch_thigh_weight': (
-                self.hybrid_leveling_pitch_thigh_weight
-            ),
-            'hybrid_leveling_pitch_calf_weight': (
-                self.hybrid_leveling_pitch_calf_weight
-            ),
-            'hybrid_leveling_roll_hip_weight': (
-                self.hybrid_leveling_roll_hip_weight
-            ),
-            'hybrid_leveling_roll_thigh_weight': (
-                self.hybrid_leveling_roll_thigh_weight
-            ),
-            'hybrid_leveling_roll_calf_weight': (
-                self.hybrid_leveling_roll_calf_weight
-            ),
-            'hybrid_leveling_yaw_hip_weight': (
-                self.hybrid_leveling_yaw_hip_weight
-            ),
-            'hybrid_leveling_yaw_thigh_weight': (
-                self.hybrid_leveling_yaw_thigh_weight
-            ),
-            'hybrid_leveling_yaw_calf_weight': (
-                self.hybrid_leveling_yaw_calf_weight
-            ),
-            'hybrid_leveling_mixed_hip_weight': (
-                self.hybrid_leveling_mixed_hip_weight
-            ),
-            'hybrid_leveling_mixed_thigh_weight': (
-                self.hybrid_leveling_mixed_thigh_weight
-            ),
-            'hybrid_leveling_mixed_calf_weight': (
-                self.hybrid_leveling_mixed_calf_weight
-            ),
-            'hybrid_leveling_pitch_max_hip_fraction': (
-                self.hybrid_leveling_pitch_max_hip_fraction
-            ),
-            'maximum_roll_hip_correction_rad': (
-                self.maximum_roll_hip_correction_rad
-            ),
-            'hybrid_leveling_wbc_target_weight': (
-                self.hybrid_leveling_wbc_target_weight
-            ),
-            'hybrid_leveling_joint_limit_avoidance_weight': (
-                self.hybrid_leveling_joint_limit_avoidance_weight
-            ),
-            'hybrid_leveling_contact_tolerance_m': (
-                self.hybrid_leveling_contact_tolerance_m
-            ),
-            'hybrid_leveling_contact_soft_limit_m': (
-                self.hybrid_leveling_contact_soft_limit_m
-            ),
-            'hybrid_leveling_contact_hard_limit_m': (
-                self.hybrid_leveling_contact_hard_limit_m
-            ),
-            'hybrid_ik_speed_soft_residual_m': (
-                self.hybrid_ik_speed_soft_residual_m
-            ),
-            'hybrid_ik_speed_hard_residual_m': (
-                self.hybrid_ik_speed_hard_residual_m
-            ),
-            'normal_force_validation_tolerance_n': (
-                self.normal_force_validation_tolerance_n
-            ),
-            'friction_validation_tolerance_n': (
-                self.friction_validation_tolerance_n
-            ),
-            'torque_validation_tolerance_nm': (
-                self.torque_validation_tolerance_nm
-            ),
             'virtual_leg_stiffness_nm_rad': self.virtual_leg_stiffness_nm_rad,
             'velocity_lookahead_sec': self.velocity_lookahead_sec,
             'maximum_wheel_speed_radps': self.maximum_wheel_speed_radps,
-            'maximum_reverse_stabilization_wheel_speed_radps': (
-                self.maximum_reverse_stabilization_wheel_speed_radps
-            ),
             'maximum_runtime_sec': self.maximum_runtime_sec,
             'startup_settle_sec': self.startup_settle_sec,
             'mixed_contact_escape_max_duration_sec': (
@@ -488,10 +303,6 @@ class WbcConfig:
             bad = [name for name, value in positive.items()
                    if not math.isfinite(value) or value <= 0.0]
             raise ValueError(f'parameters must be finite and positive: {bad}')
-        if not isinstance(self.hybrid_leveling_enabled, bool) or not isinstance(
-            self.hybrid_ik_speed_reduction_enabled, bool,
-        ):
-            raise ValueError('hybrid leveling enable parameters must be boolean')
         nonnegative = {
             'commanded_speed_mps': self.commanded_speed_mps,
             'normal_force_min_n': self.normal_force_min_n,
@@ -499,73 +310,9 @@ class WbcConfig:
             'minimum_stability_margin_m': self.minimum_stability_margin_m,
             'mixed_contact_minimum_speed_mps': self.mixed_contact_minimum_speed_mps,
             'mixed_contact_min_progress_m': self.mixed_contact_min_progress_m,
-            'orientation_deadband_deg': self.orientation_deadband_deg,
-            'hybrid_leveling_axis_deadband_deg': (
-                self.hybrid_leveling_axis_deadband_deg
-            ),
-            'hybrid_leveling_leg_yaw_scale': (
-                self.hybrid_leveling_leg_yaw_scale
-            ),
-            'hybrid_leveling_pitch_emergency_hip_rad': (
-                self.hybrid_leveling_pitch_emergency_hip_rad
-            ),
         }
         if not all(math.isfinite(v) and v >= 0.0 for v in nonnegative.values()):
             raise ValueError('nonnegative parameters contain an invalid value')
-        if self.orientation_deadband_deg >= self.maximum_orientation_error_deg:
-            raise ValueError(
-                'orientation_deadband_deg must be below '
-                'maximum_orientation_error_deg'
-            )
-        if self.maximum_orientation_error_deg > 180.0:
-            raise ValueError(
-                'maximum_orientation_error_deg must not exceed 180'
-            )
-        if not 1.0 < self.hybrid_leveling_axis_dominance_ratio:
-            raise ValueError(
-                'hybrid_leveling_axis_dominance_ratio must exceed one'
-            )
-        if not 0.0 < self.hybrid_leveling_pitch_max_hip_fraction <= 1.0:
-            raise ValueError(
-                'hybrid_leveling_pitch_max_hip_fraction must be in (0, 1]'
-            )
-        if not 0.0 <= self.hybrid_leveling_leg_yaw_scale <= 1.0:
-            raise ValueError(
-                'hybrid_leveling_leg_yaw_scale must be in [0, 1]'
-            )
-        if (
-            self.hybrid_leveling_pitch_emergency_hip_rad
-            > self.maximum_leveling_joint_correction_rad
-        ):
-            raise ValueError(
-                'hybrid_leveling_pitch_emergency_hip_rad must not exceed '
-                'maximum_leveling_joint_correction_rad'
-            )
-        if not (
-            self.hybrid_leveling_contact_tolerance_m
-            < self.hybrid_leveling_contact_soft_limit_m
-            < self.hybrid_leveling_contact_hard_limit_m
-        ):
-            raise ValueError(
-                'hybrid leveling residual limits must be strictly increasing'
-            )
-        if not (
-            0.0 < self.hybrid_leveling_backtracking_factor < 1.0
-        ):
-            raise ValueError(
-                'hybrid_leveling_backtracking_factor must be in (0, 1)'
-            )
-        if not (
-            0.0 < self.hybrid_ik_minimum_speed_scale <= 1.0
-        ):
-            raise ValueError('hybrid_ik_minimum_speed_scale must be in (0, 1]')
-        if not (
-            self.hybrid_ik_speed_soft_residual_m
-            < self.hybrid_ik_speed_hard_residual_m
-        ):
-            raise ValueError(
-                'hybrid IK speed residual limits must be strictly increasing'
-            )
         gains = (
             self.contact_kp, self.contact_kd, self.com_kp, self.com_kd,
             self.orientation_kp, self.orientation_kd, self.posture_kp,
@@ -598,18 +345,6 @@ class WbcConfig:
             raise ValueError('maximum_consecutive_solver_failures must be positive')
         if self.maximum_deadline_misses < 1:
             raise ValueError('maximum_deadline_misses must be positive')
-        if not 1 <= self.hybrid_leveling_max_iterations <= 20:
-            raise ValueError(
-                'hybrid_leveling_max_iterations must be in [1, 20]'
-            )
-        if not 1 <= self.hybrid_leveling_max_backtracking_steps <= 8:
-            raise ValueError(
-                'hybrid_leveling_max_backtracking_steps must be in [1, 8]'
-            )
-        if self.hybrid_leveling_residual_failure_cycles < 1:
-            raise ValueError(
-                'hybrid_leveling_residual_failure_cycles must be positive'
-            )
         if self.ground_truth_model_pose_index < 0:
             raise ValueError('ground_truth_model_pose_index must be nonnegative')
         required_strings = {
@@ -1565,10 +1300,10 @@ class ContactEstimator:
 
 @dataclass(frozen=True)
 class PostureTarget:
-    """World-frame torso orientation and slope-aware COM targets."""
+    """Continuous slope-aware pitch and articulated COM targets."""
 
-    desired_roll_rad: float
     desired_pitch_rad: float
+    feasible_pitch_rad: float
     desired_yaw_rad: float
     desired_com_position: np.ndarray
     desired_com_acceleration: np.ndarray
@@ -1576,26 +1311,8 @@ class PostureTarget:
     lateral_margin_m: float
 
 
-def orientation_error_body(
-    base_rotation: np.ndarray,
-    target: PostureTarget,
-) -> np.ndarray:
-    """Return the desired SO(3) displacement in free-flyer body coordinates."""
-    desired_rotation = pin.rpy.rpyToMatrix(
-        target.desired_roll_rad,
-        target.desired_pitch_rad,
-        target.desired_yaw_rad,
-    )
-    error = np.asarray(
-        pin.log3(base_rotation.T @ desired_rotation), dtype=float,
-    )
-    if error.shape != (3,) or not finite(error):
-        raise ValueError('NONFINITE_ORIENTATION_TASK')
-    return error
-
-
 class SlopePosturePlanner:
-    """Plan world-frame torso orientation and slope-aware COM motion."""
+    """Plan continuous uphill lean and conservative full-body COM motion."""
 
     def __init__(self, config: WbcConfig) -> None:
         self.config = config
@@ -1603,9 +1320,9 @@ class SlopePosturePlanner:
         self.reference_lateral_m: float | None = None
 
     def reset(self, state: EstimatedState) -> None:
-        """Initialize world-frame torso and lane references."""
-        self.reference_yaw_rad = math.radians(
-            self.config.desired_level_yaw_deg
+        """Latch the initial lane heading and lateral center for this run."""
+        _, _, self.reference_yaw_rad = quaternion_to_rpy(
+            state.base_quaternion,
         )
         lateral = np.asarray((
             -math.sin(self.reference_yaw_rad),
@@ -1640,15 +1357,33 @@ class SlopePosturePlanner:
         terrain: TerrainEstimate,
         desired_speed: float,
     ) -> PostureTarget:
-        desired_roll = math.radians(self.config.desired_level_roll_deg)
-        desired_pitch = math.radians(self.config.desired_level_pitch_deg)
-        desired_yaw = math.radians(self.config.desired_level_yaw_deg)
-        yaw = desired_yaw
+        roll, measured_pitch, _ = quaternion_to_rpy(state.base_quaternion)
+        del roll
+        yaw = self.reference_yaw_rad
         if self.reference_lateral_m is None:
             self.reset(state)
+            yaw = self.reference_yaw_rad
         slope_deg = clamp(
             max(terrain.fast_slope_deg, terrain.stable_slope_deg),
             0.0, self.config.maximum_slope_deg,
+        )
+        normalized = slope_deg / max(self.config.maximum_slope_deg, 1.0)
+        smooth = normalized * normalized * (3.0 - 2.0 * normalized)
+        alignment = 0.18 + 0.62 * smooth
+        desired_pitch = math.radians(self.config.desired_level_pitch_deg) - (
+            alignment * math.radians(slope_deg)
+        )
+        phase_scale = 0.85 if terrain.contact_phase in (
+            ContactPhase.MIXED_CONTACT_ENTRY,
+            ContactPhase.MIXED_CONTACT_EXIT,
+        ) else 1.0
+        maximum_lean = math.radians(min(
+            self.config.maximum_pitch_deg - 5.0,
+            0.90 * self.config.maximum_slope_deg,
+        ))
+        feasible_pitch = clamp(
+            phase_scale * desired_pitch,
+            -maximum_lean, maximum_lean,
         )
         longitudinal, lateral_margin, support_s, support_l = self.stability_margins(
             dynamics.com_position, contacts, yaw,
@@ -1682,113 +1417,19 @@ class SlopePosturePlanner:
         norm = float(np.linalg.norm(acceleration))
         if norm > self.config.maximum_com_accel_mps2:
             acceleration *= self.config.maximum_com_accel_mps2 / norm
+        # Avoid requesting an instantaneous discontinuous pitch target.
+        feasible_pitch = measured_pitch + clamp(
+            feasible_pitch - measured_pitch, -math.radians(12.0), math.radians(12.0),
+        )
         return PostureTarget(
-            desired_roll_rad=desired_roll,
             desired_pitch_rad=desired_pitch,
-            desired_yaw_rad=desired_yaw,
+            feasible_pitch_rad=feasible_pitch,
+            desired_yaw_rad=yaw,
             desired_com_position=desired_com,
             desired_com_acceleration=acceleration,
             longitudinal_margin_m=longitudinal,
             lateral_margin_m=lateral_margin,
         )
-
-
-@dataclass(frozen=True)
-class QpConstraintViolation:
-    """Exact post-solve safety-bound violation for one QP candidate."""
-
-    category: str = 'none'
-    name: str = 'none'
-    value: float = 0.0
-    bound: float = 0.0
-    amount: float = 0.0
-
-
-def maximum_qp_constraint_violation(
-    force_components: Sequence[float],
-    tau: Sequence[float],
-    robot: RobotModel,
-    config: WbcConfig,
-) -> QpConstraintViolation:
-    """Identify the largest normal, friction, or actuator-bound violation."""
-    forces = np.asarray(force_components, dtype=float)
-    torques = np.asarray(tau, dtype=float)
-    if forces.shape != (12,) or torques.shape != (16,) or not finite(
-        forces, torques,
-    ):
-        return QpConstraintViolation(
-            category='nonfinite_solution', name='decision_vector',
-            amount=MAX_BOUND,
-        )
-    candidates: list[QpConstraintViolation] = []
-    for wheel, leg in enumerate(LEGS):
-        longitudinal, lateral, normal = forces[3 * wheel:3 * wheel + 3]
-        candidates.extend((
-            QpConstraintViolation(
-                'minimum_normal_force', leg, float(normal),
-                config.normal_force_min_n,
-                config.normal_force_min_n - float(normal),
-            ),
-            QpConstraintViolation(
-                'maximum_normal_force', leg, float(normal),
-                config.normal_force_max_n,
-                float(normal) - config.normal_force_max_n,
-            ),
-            QpConstraintViolation(
-                'longitudinal_friction', leg, abs(float(longitudinal)),
-                config.friction_mu_longitudinal * float(normal),
-                abs(float(longitudinal))
-                - config.friction_mu_longitudinal * float(normal),
-            ),
-            QpConstraintViolation(
-                'lateral_friction', leg, abs(float(lateral)),
-                config.friction_mu_lateral * float(normal),
-                abs(float(lateral))
-                - config.friction_mu_lateral * float(normal),
-            ),
-        ))
-    for actuator, name in enumerate(ACTUATED_JOINT_NAMES):
-        scale = (
-            config.wheel_torque_scale
-            if name in WHEEL_JOINT_NAMES else config.leg_torque_scale
-        )
-        bound = float(robot.effort_limits[actuator] * scale)
-        candidates.append(QpConstraintViolation(
-            'actuator_torque', name, abs(float(torques[actuator])), bound,
-            abs(float(torques[actuator])) - bound,
-        ))
-    return max(candidates, key=lambda item: item.amount)
-
-
-def qp_constraint_validation_tolerance(
-    violation: QpConstraintViolation,
-    config: WbcConfig,
-    primal_residual: float,
-) -> float:
-    """Return a unit-correct post-solve allowance without changing QP bounds."""
-    residual_allowance = max(
-        10.0 * config.solver_eps_abs,
-        abs(float(primal_residual)) if math.isfinite(primal_residual) else 0.0,
-    )
-    if violation.category in {
-        'minimum_normal_force', 'maximum_normal_force',
-    }:
-        configured = config.normal_force_validation_tolerance_n
-    elif violation.category in {
-        'longitudinal_friction', 'lateral_friction',
-    }:
-        configured = config.friction_validation_tolerance_n
-    elif violation.category == 'actuator_torque':
-        configured = config.torque_validation_tolerance_nm
-    elif violation.category == 'none':
-        return 0.0
-    else:
-        return -math.inf
-    if violation.category in {
-        'minimum_normal_force', 'maximum_normal_force',
-    }:
-        return max(configured, residual_allowance)
-    return max(configured, 10.0 * config.solver_eps_abs)
 
 
 @dataclass(frozen=True)
@@ -1807,7 +1448,6 @@ class QpResult:
     primal_residual: float = 0.0
     dual_residual: float = 0.0
     warm_started: bool = False
-    constraint_violation: QpConstraintViolation = QpConstraintViolation()
 
 
 def complete_solution_or_fallback(
@@ -1847,7 +1487,6 @@ class WholeBodyQp:
         self.previous_x: np.ndarray | None = None
         self.previous_tau: np.ndarray | None = None
         self.previous_force: np.ndarray | None = None
-        self.last_constraint_violation = QpConstraintViolation()
         self.solve_count = 0
 
     @staticmethod
@@ -2016,40 +1655,6 @@ class WholeBodyQp:
             raise ValueError('INVALID_QP_VARIABLE_BOUNDS')
         return lower, upper
 
-    def _orientation_angular_target(
-        self,
-        base_rotation: np.ndarray,
-        angular_velocity_body: np.ndarray,
-        target: PostureTarget,
-    ) -> np.ndarray:
-        """Return bounded body-frame SO(3) angular acceleration feedback."""
-        orientation_error = orientation_error_body(base_rotation, target)
-        if not finite(orientation_error, angular_velocity_body):
-            raise ValueError('NONFINITE_ORIENTATION_TASK')
-        error_norm = float(np.linalg.norm(orientation_error))
-        deadband_rad = math.radians(self.config.orientation_deadband_deg)
-        if error_norm < deadband_rad:
-            orientation_error[:] = 0.0
-            error_norm = 0.0
-        maximum_error_rad = math.radians(
-            self.config.maximum_orientation_error_deg
-        )
-        if error_norm > maximum_error_rad:
-            orientation_error *= maximum_error_rad / error_norm
-        angular_target = (
-            self.config.orientation_kp * orientation_error
-            - self.config.orientation_kd * angular_velocity_body
-        )
-        angular_accel_norm = float(np.linalg.norm(angular_target))
-        if not math.isfinite(angular_accel_norm):
-            raise ValueError('NONFINITE_ORIENTATION_TASK')
-        if angular_accel_norm > self.config.maximum_base_angular_accel_radps2:
-            angular_target *= (
-                self.config.maximum_base_angular_accel_radps2
-                / angular_accel_norm
-            )
-        return angular_target
-
     def _assemble(
         self,
         state: EstimatedState,
@@ -2070,19 +1675,19 @@ class WholeBodyQp:
             self.config.com_weight,
         )
         # SO(3) body task in the local free-flyer tangent coordinates.
-        angular_target = self._orientation_angular_target(
-            dynamics.base_rotation, state.v[3:6], target,
+        desired_rotation = pin.rpy.rpyToMatrix(
+            0.0, target.feasible_pitch_rad, target.desired_yaw_rad,
+        )
+        orientation_error = pin.log3(dynamics.base_rotation.T @ desired_rotation)
+        angular_target = (
+            self.config.orientation_kp * orientation_error
+            - self.config.orientation_kd * state.v[3:6]
         )
         task = np.zeros((3, self.nvar))
         task[:, 3:6] = np.eye(3)
-        axis_weights = np.asarray((
-            self.config.orientation_roll_weight_scale,
-            self.config.orientation_pitch_weight_scale,
-            self.config.orientation_yaw_weight_scale,
-        ))
         self._add_task(
             H, g, task, angular_target,
-            self.config.base_orientation_weight * axis_weights,
+            self.config.base_orientation_weight * np.asarray((1.5, 1.0, 0.2)),
         )
         # Joint posture regularization, excluding continuously rotating wheels.
         task = np.zeros((12, self.nvar))
@@ -2257,40 +1862,41 @@ class WholeBodyQp:
                     self.solver.warm_start(x=self.previous_x)
             result = self.solver.solve(raise_error=False)
         except Exception as error:
-            violation = QpConstraintViolation(
-                category='qp_assembly', name=str(error),
-            )
-            self.last_constraint_violation = violation
-            return self.failed_result(
-                f'QP_ASSEMBLY_ERROR:{error}', violation=violation,
-            )
+            return self.failed_result(f'QP_ASSEMBLY_ERROR:{error}')
         info = result.info
         solved = str(info.status).lower() in {'solved', 'solved inaccurate'}
         vector = None if result.x is None else np.asarray(result.x, dtype=float)
         if not solved or vector is None or vector.shape != (self.nvar,) or not finite(vector):
-            violation = QpConstraintViolation(
-                category='solver_status', name=str(info.status),
-            )
-            self.last_constraint_violation = violation
             return self.failed_result(
-                str(info.status), info, violation,
+                str(info.status), info,
             )
         candidate_forces = vector[self.force_offset:self.tau_offset]
+        safety_violations: list[float] = []
+        for wheel in range(4):
+            longitudinal, lateral, normal = candidate_forces[
+                3 * wheel:3 * wheel + 3
+            ]
+            safety_violations.extend((
+                self.config.normal_force_min_n - normal,
+                normal - self.config.normal_force_max_n,
+                abs(longitudinal)
+                - self.config.friction_mu_longitudinal * normal,
+                abs(lateral) - self.config.friction_mu_lateral * normal,
+            ))
         candidate_tau = vector[self.tau_offset:]
-        violation = maximum_qp_constraint_violation(
-            candidate_forces, candidate_tau, self.robot, self.config,
-        )
-        constraint_tolerance = qp_constraint_validation_tolerance(
-            violation, self.config, float(info.prim_res),
-        )
-        if (
-            not math.isfinite(violation.amount)
-            or violation.amount > constraint_tolerance
-        ):
-            self.last_constraint_violation = violation
-            return self.failed_result(
-                'QP_CONSTRAINT_RESIDUAL', info, violation,
+        for actuator, name in enumerate(ACTUATED_JOINT_NAMES):
+            scale = (
+                self.config.wheel_torque_scale
+                if name in WHEEL_JOINT_NAMES else self.config.leg_torque_scale
             )
+            safety_violations.append(
+                abs(candidate_tau[actuator])
+                - self.robot.effort_limits[actuator] * scale
+            )
+        maximum_violation = float(max(*safety_violations, 0.0))
+        constraint_tolerance = max(0.010, 10.0 * self.config.solver_eps_abs)
+        if not math.isfinite(maximum_violation) or maximum_violation > constraint_tolerance:
+            return self.failed_result('QP_CONSTRAINT_RESIDUAL', info)
         qdd = vector[:self.nqdd].copy()
         force_components = vector[self.force_offset:self.tau_offset].copy()
         tau = vector[self.tau_offset:].copy()
@@ -2299,19 +1905,11 @@ class WholeBodyQp:
             for wheel, leg in enumerate(LEGS)
         ])
         if not finite(qdd, force_components, world_forces, tau):
-            violation = QpConstraintViolation(
-                category='nonfinite_solution', name='decision_vector',
-                amount=MAX_BOUND,
-            )
-            self.last_constraint_violation = violation
-            return self.failed_result(
-                'NONFINITE_QP_SOLUTION', info, violation,
-            )
+            return self.failed_result('NONFINITE_QP_SOLUTION', info)
         warm_started = self.previous_x is not None
         self.previous_x = vector.copy()
         self.previous_tau = tau.copy()
         self.previous_force = force_components.copy()
-        self.last_constraint_violation = QpConstraintViolation()
         self.solve_count += 1
         return QpResult(
             success=True, status=str(info.status), qdd=qdd,
@@ -2321,12 +1919,7 @@ class WholeBodyQp:
             dual_residual=float(info.dual_res), warm_started=warm_started,
         )
 
-    def failed_result(
-        self,
-        status: str,
-        info: Any | None = None,
-        violation: QpConstraintViolation = QpConstraintViolation(),
-    ) -> QpResult:
+    def failed_result(self, status: str, info: Any | None = None) -> QpResult:
         return QpResult(
             success=False, status=status,
             qdd=np.zeros(self.nqdd), force_components=np.zeros(self.nforce),
@@ -2337,7 +1930,6 @@ class WholeBodyQp:
             primal_residual=float(getattr(info, 'prim_res', 0.0)),
             dual_residual=float(getattr(info, 'dual_res', 0.0)),
             warm_started=self.previous_x is not None,
-            constraint_violation=violation,
         )
 
     def reset(self) -> None:
@@ -2345,7 +1937,6 @@ class WholeBodyQp:
         self.previous_x = None
         self.previous_tau = None
         self.previous_force = None
-        self.last_constraint_violation = QpConstraintViolation()
         self.solve_count = 0
 
 
@@ -2537,47 +2128,6 @@ class HybridCommand:
     wheel_velocities: np.ndarray
 
 
-@dataclass(frozen=True)
-class HybridIkTarget:
-    """One coherent target plus independent requested/accepted axis evidence."""
-
-    positions: np.ndarray
-    base_rotation: np.ndarray
-    iterations: int
-    condition_number: float
-    minimum_singular_value: float
-    authority_scale: float
-    requested_rotation_body: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    pitch_requested_rad: float = 0.0
-    pitch_accepted_fraction: float = 0.0
-    pitch_final_residual_m: float = 0.0
-    pitch_max_hip_delta_rad: float = 0.0
-    pitch_max_sagittal_delta_rad: float = 0.0
-    roll_requested_rad: float = 0.0
-    roll_accepted_fraction: float = 0.0
-    roll_final_residual_m: float = 0.0
-    roll_max_hip_delta_rad: float = 0.0
-    leg_yaw_requested_rad: float = 0.0
-    leg_yaw_accepted_fraction: float = 0.0
-    allocation_attempted: bool = False
-    allocation_residual_m: float = 0.0
-    allocation_degraded: bool = False
-
-
-@dataclass(frozen=True)
-class AxisIkResult:
-    """Result of one structurally bounded axis-allocation subsolve."""
-
-    positions: np.ndarray
-    rotation: np.ndarray
-    accepted_fraction: float
-    residual_m: float
-    iterations: int
-    condition_number: float
-    minimum_singular_value: float
-    attempted: bool
-
-
 class HybridPositionVelocityAdapter:
     """Convert WBC acceleration/torque intent to stock safe interfaces."""
 
@@ -2600,1059 +2150,6 @@ class HybridPositionVelocityAdapter:
         )
         self.last_leg_command: np.ndarray | None = None
         self.last_wheel_command = np.zeros(4)
-        self.last_leveling_orientation_body = np.zeros(3)
-        self.last_ik_original_rotation_error_body = np.zeros(3)
-        self.last_ik_bounded_requested_rotation_body = np.zeros(3)
-        self.last_leveling_correction = np.zeros(12)
-        self.last_wbc_joint_delta = np.zeros(12)
-        self.last_leveling_target = np.zeros(12)
-        self.last_ik_contact_residuals = np.zeros(4)
-        self.last_ik_wheelbase_before = np.zeros(2)
-        self.last_ik_wheelbase_after = np.zeros(2)
-        self.last_ik_axle_width_before = np.zeros(2)
-        self.last_ik_axle_width_after = np.zeros(2)
-        self.last_ik_minimum_joint_limit_margin_rad = 0.0
-        self.last_ik_condition_number = 0.0
-        self.last_ik_minimum_singular_value = 0.0
-        self.last_ik_iterations = 0
-        self.last_ik_authority_scale = 0.0
-        self.last_ik_selected_correction_fraction = 0.0
-        self.last_ik_candidate_residual_m = 0.0
-        self.last_ik_final_command_residual_m = 0.0
-        self.last_ik_residual_state = IK_RESIDUAL_NO_CORRECTION_NEEDED
-        self.last_ik_correction_requested = False
-        self.ik_residual_rejection_count = 0
-        self.consecutive_ik_residual_failures = 0
-        self.ik_degraded_count = 0
-        self.last_ik_pitch_hip_to_sagittal_ratio = 0.0
-        self.last_ik_pitch_requested_rad = 0.0
-        self.last_ik_pitch_accepted_fraction = 0.0
-        self.last_ik_pitch_final_residual_m = 0.0
-        self.last_ik_pitch_max_hip_delta_rad = 0.0
-        self.last_ik_roll_requested_rad = 0.0
-        self.last_ik_roll_accepted_fraction = 0.0
-        self.last_ik_roll_final_residual_m = 0.0
-        self.last_ik_roll_max_hip_delta_rad = 0.0
-        self.last_ik_leg_yaw_requested_rad = 0.0
-        self.last_ik_leg_yaw_accepted_fraction = 0.0
-        self.last_ik_axis_fractions = np.zeros(3)
-        self.last_ik_axis_mode = 'none'
-        self.last_ik_joint_regularization = np.ones(3)
-        self.last_ik_speed_scale = 1.0
-        self.leveling_solve_fallbacks = 0
-        self.ik_data = (
-            robot.model.createData()
-            if hasattr(robot, 'model') and hasattr(robot, 'frame_ids')
-            else None
-        )
-
-    def _leveling_orientation_correction(
-        self,
-        dynamics: DynamicsSnapshot,
-        target: PostureTarget,
-    ) -> np.ndarray:
-        """Generate and rate-limit the bounded SO(3) allocation demand."""
-        if not self.config.hybrid_leveling_enabled:
-            self.last_ik_original_rotation_error_body[:] = 0.0
-            self.last_ik_bounded_requested_rotation_body[:] = 0.0
-            self.last_leveling_orientation_body[:] = 0.0
-            self._axis_aware_joint_regularization(np.zeros(3))
-            return self.last_leveling_orientation_body.copy()
-        desired = orientation_error_body(dynamics.base_rotation, target)
-        self.last_ik_original_rotation_error_body = desired.copy()
-        error_norm = float(np.linalg.norm(desired))
-        if error_norm < math.radians(self.config.orientation_deadband_deg):
-            desired[:] = 0.0
-            self.last_leveling_orientation_body[:] = 0.0
-        else:
-            maximum = math.radians(
-                self.config.maximum_orientation_error_deg
-            )
-            if error_norm > maximum:
-                desired *= maximum / error_norm
-            self._axis_aware_joint_regularization(desired)
-            desired *= self.config.hybrid_leveling_gain * np.asarray((
-                self.config.hybrid_leveling_roll_scale,
-                self.config.hybrid_leveling_pitch_scale,
-                self.config.hybrid_leveling_yaw_scale,
-            ))
-            desired_norm = float(np.linalg.norm(desired))
-            if desired_norm > maximum:
-                desired *= maximum / desired_norm
-        if not np.any(desired):
-            self._axis_aware_joint_regularization(desired)
-            self.last_ik_bounded_requested_rotation_body[:] = 0.0
-            return np.zeros(3)
-        change = desired - self.last_leveling_orientation_body
-        change_norm = float(np.linalg.norm(change))
-        maximum_step = math.radians(
-            self.config.maximum_leveling_orientation_step_deg
-        )
-        if change_norm > maximum_step:
-            change *= maximum_step / change_norm
-        requested = self.last_leveling_orientation_body + change
-        if not finite(requested):
-            requested[:] = 0.0
-        self.last_ik_bounded_requested_rotation_body = requested.copy()
-        return requested
-
-    def _axis_aware_joint_regularization(
-        self,
-        delta_theta_body: np.ndarray,
-    ) -> np.ndarray:
-        """Blend real-model joint penalties continuously across SO(3) axes."""
-        magnitudes = np.abs(np.asarray(delta_theta_body, dtype=float))
-        deadband = math.radians(self.config.hybrid_leveling_axis_deadband_deg)
-        active = np.maximum(magnitudes - deadband, 0.0)
-        if float(np.sum(active)) <= 1.0e-12:
-            active = magnitudes
-        total = float(np.sum(active))
-        fractions = active / total if total > 1.0e-12 else np.zeros(3)
-        self.last_ik_axis_fractions = fractions
-        if total <= 1.0e-12:
-            mode = 'none'
-        else:
-            order = np.sort(fractions)
-            dominant = int(np.argmax(fractions))
-            mode = ('roll', 'pitch', 'yaw')[dominant]
-            if order[-2] > 0.0 and order[-1] < (
-                self.config.hybrid_leveling_axis_dominance_ratio * order[-2]
-            ):
-                mode = 'mixed'
-        self.last_ik_axis_mode = mode
-        axis_weights = np.asarray((
-            (
-                self.config.hybrid_leveling_roll_hip_weight,
-                self.config.hybrid_leveling_roll_thigh_weight,
-                self.config.hybrid_leveling_roll_calf_weight,
-            ),
-            (
-                self.config.hybrid_leveling_pitch_hip_weight,
-                self.config.hybrid_leveling_pitch_thigh_weight,
-                self.config.hybrid_leveling_pitch_calf_weight,
-            ),
-            (
-                self.config.hybrid_leveling_yaw_hip_weight,
-                self.config.hybrid_leveling_yaw_thigh_weight,
-                self.config.hybrid_leveling_yaw_calf_weight,
-            ),
-        ))
-        blended = fractions @ axis_weights
-        mixed = np.asarray((
-            self.config.hybrid_leveling_mixed_hip_weight,
-            self.config.hybrid_leveling_mixed_thigh_weight,
-            self.config.hybrid_leveling_mixed_calf_weight,
-        ))
-        if total <= 1.0e-12:
-            blended = mixed
-        else:
-            concentration = clamp(
-                (float(np.max(fractions)) - 1.0 / 3.0) / (2.0 / 3.0),
-                0.0, 1.0,
-            )
-            blended = concentration * blended + (1.0 - concentration) * mixed
-        if not finite(blended) or np.any(blended <= 0.0):
-            raise ValueError('INVALID_HYBRID_IK_JOINT_REGULARIZATION')
-        self.last_ik_joint_regularization = blended
-        return np.tile(blended, 4)
-
-    def _safe_joint_bounds(self) -> tuple[np.ndarray, np.ndarray]:
-        margin = self.config.joint_limit_margin_rad
-        return (
-            self.robot.position_lower + margin,
-            self.robot.position_upper - margin,
-        )
-
-    def _minimum_joint_limit_margin(self, positions: np.ndarray) -> float:
-        lower, upper = self._safe_joint_bounds()
-        return float(np.min(np.minimum(positions - lower, upper - positions)))
-
-    @staticmethod
-    def _smooth_authority(ratio: float) -> float:
-        value = clamp(ratio, 0.0, 1.0)
-        return value * value * (3.0 - 2.0 * value)
-
-    def _ik_authority(
-        self,
-        minimum_singular_value: float,
-        minimum_joint_margin: float,
-    ) -> float:
-        conditioning = self._smooth_authority(
-            minimum_singular_value
-            / max(2.0 * self.config.hybrid_leveling_damping, 1.0e-9)
-        )
-        limit = self._smooth_authority(
-            minimum_joint_margin
-            / max(3.0 * self.config.joint_limit_margin_rad, 1.0e-9)
-        )
-        return min(conditioning, limit)
-
-    def _configuration_with_leg_target(
-        self,
-        state: EstimatedState,
-        base_rotation: np.ndarray,
-        positions: np.ndarray,
-    ) -> np.ndarray:
-        q = state.q.copy()
-        q[3:7] = pin.Quaternion(base_rotation).coeffs()
-        for name, position in zip(LEG_JOINT_NAMES, positions):
-            q[self.robot.q_indices[name]] = position
-        return q
-
-    def _ik_contact_system(
-        self,
-        q: np.ndarray,
-        contacts: Mapping[str, ContactFrame],
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
-        """Return weighted nonlinear residual/Jacobian at one trial state."""
-        if self.ik_data is None:
-            raise ValueError('HYBRID_IK_MODEL_UNAVAILABLE')
-        pin.forwardKinematics(self.robot.model, self.ik_data, q)
-        pin.updateFramePlacements(self.robot.model, self.ik_data)
-        pin.computeJointJacobians(self.robot.model, self.ik_data, q)
-        matrix = np.zeros((12, 12))
-        residual = np.zeros(12)
-        points = np.zeros((4, 3))
-        minimum_singular = math.inf
-        maximum_condition = 0.0
-        weights = np.sqrt(np.asarray((
-            self.config.hybrid_leveling_contact_tangent_weight,
-            self.config.hybrid_leveling_contact_lateral_weight,
-            self.config.hybrid_leveling_contact_normal_weight,
-        )))
-        for leg_index, leg in enumerate(LEGS):
-            frame = contacts[leg]
-            placement = self.ik_data.oMf[self.robot.frame_ids[leg]]
-            point = np.asarray(placement.translation, dtype=float) - (
-                self.robot.wheel_radius * frame.normal
-            )
-            points[leg_index] = point
-            world_residual = frame.point - point
-            leg_indices = [
-                self.robot.v_indices[f'{leg}_{joint}_joint']
-                for joint in ('hip', 'thigh', 'calf')
-            ]
-            frame_jacobian = np.asarray(pin.getFrameJacobian(
-                self.robot.model, self.ik_data,
-                self.robot.frame_ids[leg],
-                pin.ReferenceFrame.LOCAL_WORLD_ALIGNED,
-            ), dtype=float)
-            # The terrain-normal wheel-radius offset is world-fixed for this
-            # short-lived correction, so its derivative is the center Jacobian.
-            leg_jacobian = frame.basis.T @ frame_jacobian[:3, leg_indices]
-            singular_values = np.linalg.svd(
-                leg_jacobian, compute_uv=False,
-            )
-            smallest = float(singular_values[-1])
-            largest = float(singular_values[0])
-            minimum_singular = min(minimum_singular, smallest)
-            condition = (
-                largest / smallest if smallest > 1.0e-12 else MAX_BOUND
-            )
-            maximum_condition = max(maximum_condition, condition)
-            rows = slice(3 * leg_index, 3 * leg_index + 3)
-            columns = slice(3 * leg_index, 3 * leg_index + 3)
-            matrix[rows, columns] = weights[:, None] * leg_jacobian
-            residual[rows] = weights * (frame.basis.T @ world_residual)
-        if not finite(
-            matrix, residual, points, minimum_singular, maximum_condition,
-        ):
-            raise ValueError('NONFINITE_HYBRID_IK_SYSTEM')
-        return (
-            matrix, residual, points,
-            minimum_singular, maximum_condition,
-        )
-
-    @staticmethod
-    def _contact_geometry(
-        points: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        wheelbase = np.asarray((
-            np.linalg.norm(points[0] - points[2]),
-            np.linalg.norm(points[1] - points[3]),
-        ))
-        axle_width = np.asarray((
-            np.linalg.norm(points[0] - points[1]),
-            np.linalg.norm(points[2] - points[3]),
-        ))
-        return wheelbase, axle_width
-
-    def _axis_backtracking_fractions(self) -> tuple[float, ...]:
-        """Return the configured largest-first axis authority sequence."""
-        return tuple(
-            self.config.hybrid_leveling_backtracking_factor ** index
-            for index in range(
-                self.config.hybrid_leveling_max_backtracking_steps
-            )
-        )
-
-    def _solve_axis_rotation(
-        self,
-        state: EstimatedState,
-        contacts: Mapping[str, ContactFrame],
-        start_positions: np.ndarray,
-        start_rotation: np.ndarray,
-        requested_delta: np.ndarray,
-        active_joint_indices: np.ndarray,
-        wbc_target: np.ndarray,
-        lower: np.ndarray,
-        upper: np.ndarray,
-        joint_regularization: np.ndarray,
-        hip_limit_rad: float | None = None,
-    ) -> AxisIkResult:
-        """Allocate one body-axis rotation with a structural joint subset."""
-        if float(np.linalg.norm(requested_delta)) <= 1.0e-12:
-            return AxisIkResult(
-                start_positions.copy(), start_rotation.copy(), 0.0, 0.0,
-                0, 0.0, 0.0, False,
-            )
-        correction_limit = self.config.maximum_leveling_joint_correction_rad
-        correction_lower = np.maximum(lower, wbc_target - correction_limit)
-        correction_upper = np.minimum(upper, wbc_target + correction_limit)
-        if hip_limit_rad is not None:
-            correction_lower[0::3] = np.maximum(
-                correction_lower[0::3], wbc_target[0::3] - hip_limit_rad,
-            )
-            correction_upper[0::3] = np.minimum(
-                correction_upper[0::3], wbc_target[0::3] + hip_limit_rad,
-            )
-        targets = np.vstack([contacts[leg].point for leg in LEGS])
-        damping_squared = self.config.hybrid_leveling_damping ** 2
-        best_residual = math.inf
-        total_iterations = 0
-        maximum_condition = 0.0
-        minimum_singular = math.inf
-        active_joint_indices = np.asarray(active_joint_indices, dtype=int)
-        regularization_weights = np.asarray(
-            joint_regularization, dtype=float,
-        )[active_joint_indices]
-        for fraction in self._axis_backtracking_fractions():
-            desired_rotation = start_rotation @ pin.exp3(
-                fraction * requested_delta
-            )
-            candidate = start_positions.copy()
-            candidate[active_joint_indices] = np.clip(
-                candidate[active_joint_indices],
-                correction_lower[active_joint_indices],
-                correction_upper[active_joint_indices],
-            )
-            fraction_residual = math.inf
-            for _ in range(self.config.hybrid_leveling_max_iterations):
-                total_iterations += 1
-                try:
-                    trial_q = self._configuration_with_leg_target(
-                        state, desired_rotation, candidate,
-                    )
-                    matrix, residual, points, _, _ = (
-                        self._ik_contact_system(trial_q, contacts)
-                    )
-                    reduced = matrix[:, active_joint_indices]
-                    singular_values = np.linalg.svd(
-                        reduced, compute_uv=False,
-                    )
-                except (ValueError, np.linalg.LinAlgError):
-                    self.leveling_solve_fallbacks += 1
-                    break
-                fraction_residual = float(np.max(np.linalg.norm(
-                    points - targets, axis=1,
-                )))
-                best_residual = min(best_residual, fraction_residual)
-                smallest = float(singular_values[-1])
-                largest = float(singular_values[0])
-                condition = (
-                    largest / smallest if smallest > 1.0e-12 else MAX_BOUND
-                )
-                minimum_singular = min(minimum_singular, smallest)
-                maximum_condition = max(maximum_condition, condition)
-                if fraction_residual <= (
-                    self.config.hybrid_leveling_contact_tolerance_m
-                ):
-                    return AxisIkResult(
-                        candidate, desired_rotation, fraction,
-                        fraction_residual, total_iterations,
-                        maximum_condition, minimum_singular, True,
-                    )
-                authority = self._ik_authority(
-                    smallest, self._minimum_joint_limit_margin(candidate),
-                )
-                regularization = damping_squared * regularization_weights
-                hessian = reduced.T @ reduced + np.diag(regularization)
-                rhs = reduced.T @ residual
-                rhs += regularization * (
-                    start_positions[active_joint_indices]
-                    - candidate[active_joint_indices]
-                )
-                wbc_regularization = (
-                    damping_squared
-                    * self.config.hybrid_leveling_wbc_target_weight
-                )
-                hessian += wbc_regularization * np.eye(
-                    len(active_joint_indices)
-                )
-                rhs += wbc_regularization * (
-                    wbc_target[active_joint_indices]
-                    - candidate[active_joint_indices]
-                )
-                guard = max(
-                    4.0 * self.config.joint_limit_margin_rad, 0.05,
-                )
-                inward = np.zeros(len(active_joint_indices))
-                active_limits = np.zeros(len(active_joint_indices))
-                for local_index, joint_index in enumerate(
-                    active_joint_indices
-                ):
-                    if candidate[joint_index] - lower[joint_index] < guard:
-                        inward[local_index] = (
-                            lower[joint_index] + guard
-                            - candidate[joint_index]
-                        )
-                        active_limits[local_index] = 1.0
-                    elif upper[joint_index] - candidate[joint_index] < guard:
-                        inward[local_index] = (
-                            upper[joint_index] - guard
-                            - candidate[joint_index]
-                        )
-                        active_limits[local_index] = 1.0
-                limit_regularization = (
-                    damping_squared
-                    * self.config.hybrid_leveling_joint_limit_avoidance_weight
-                    * active_limits
-                )
-                hessian += np.diag(limit_regularization)
-                rhs += limit_regularization * inward
-                try:
-                    step = np.linalg.solve(hessian, rhs)
-                except np.linalg.LinAlgError:
-                    self.leveling_solve_fallbacks += 1
-                    break
-                if not finite(step):
-                    self.leveling_solve_fallbacks += 1
-                    break
-                candidate[active_joint_indices] = np.clip(
-                    candidate[active_joint_indices] + authority * step,
-                    correction_lower[active_joint_indices],
-                    correction_upper[active_joint_indices],
-                )
-            try:
-                trial_q = self._configuration_with_leg_target(
-                    state, desired_rotation, candidate,
-                )
-                _, _, points, _, _ = self._ik_contact_system(
-                    trial_q, contacts,
-                )
-                fraction_residual = float(np.max(np.linalg.norm(
-                    points - targets, axis=1,
-                )))
-                best_residual = min(best_residual, fraction_residual)
-            except (ValueError, np.linalg.LinAlgError):
-                self.leveling_solve_fallbacks += 1
-                fraction_residual = math.inf
-            if fraction_residual <= (
-                self.config.hybrid_leveling_contact_tolerance_m
-            ):
-                return AxisIkResult(
-                    candidate, desired_rotation, fraction,
-                    fraction_residual, total_iterations,
-                    maximum_condition, minimum_singular, True,
-                )
-        return AxisIkResult(
-            start_positions.copy(), start_rotation.copy(), 0.0,
-            best_residual, total_iterations, maximum_condition,
-            0.0 if minimum_singular == math.inf else minimum_singular,
-            True,
-        )
-
-    def _leveling_joint_target(
-        self,
-        state: EstimatedState,
-        dynamics: DynamicsSnapshot,
-        contacts: Mapping[str, ContactFrame],
-        target: PostureTarget,
-        wbc_target: np.ndarray,
-    ) -> HybridIkTarget:
-        """Allocate pitch, roll, then optional leg yaw without axis leakage."""
-        requested = self._leveling_orientation_correction(
-            dynamics, target,
-        )
-        self.last_ik_pitch_hip_to_sagittal_ratio = 0.0
-        current = np.asarray([
-            state.q[self.robot.q_indices[name]] for name in LEG_JOINT_NAMES
-        ])
-        lower, upper = self._safe_joint_bounds()
-        wbc_target = np.clip(wbc_target, lower, upper)
-        pitch_requested = float(requested[1])
-        roll_requested = float(requested[0])
-        leg_yaw_requested = float(
-            requested[2] * self.config.hybrid_leveling_leg_yaw_scale
-        )
-        self.last_ik_pitch_requested_rad = pitch_requested
-        self.last_ik_roll_requested_rad = roll_requested
-        self.last_ik_leg_yaw_requested_rad = leg_yaw_requested
-        if self.ik_data is None or any(leg not in contacts for leg in LEGS):
-            self.leveling_solve_fallbacks += 1
-            self.last_leveling_orientation_body[:] = 0.0
-            return HybridIkTarget(
-                wbc_target, dynamics.base_rotation.copy(), 0,
-                MAX_BOUND, 0.0, 0.0,
-                requested_rotation_body=tuple(requested),
-                pitch_requested_rad=pitch_requested,
-                roll_requested_rad=roll_requested,
-                leg_yaw_requested_rad=leg_yaw_requested,
-                allocation_residual_m=math.inf,
-                allocation_degraded=bool(np.any(requested)),
-            )
-        if float(np.linalg.norm(requested)) <= 1.0e-12:
-            self.last_leveling_orientation_body[:] = 0.0
-            return HybridIkTarget(
-                wbc_target, dynamics.base_rotation.copy(), 0,
-                0.0, 0.0, 0.0,
-            )
-
-        pitch_delta = np.asarray((0.0, pitch_requested, 0.0))
-        sagittal_indices = np.asarray((
-            1, 2, 4, 5, 7, 8, 10, 11,
-        ))
-        pitch_weights = np.tile(np.asarray((
-            self.config.hybrid_leveling_pitch_hip_weight,
-            self.config.hybrid_leveling_pitch_thigh_weight,
-            self.config.hybrid_leveling_pitch_calf_weight,
-        )), 4)
-        pitch = self._solve_axis_rotation(
-            state, contacts, current, dynamics.base_rotation,
-            pitch_delta, sagittal_indices, wbc_target, lower, upper,
-            pitch_weights,
-        )
-        if (
-            pitch.accepted_fraction == 0.0
-            and abs(pitch_requested) > 1.0e-12
-            and self.config.hybrid_leveling_pitch_emergency_hip_rad > 0.0
-        ):
-            pitch = self._solve_axis_rotation(
-                state, contacts, current, dynamics.base_rotation,
-                pitch_delta, np.arange(12), wbc_target, lower, upper,
-                pitch_weights,
-                hip_limit_rad=(
-                    self.config.hybrid_leveling_pitch_emergency_hip_rad
-                ),
-            )
-        pitch_delta_joints = pitch.positions - current
-        pitch_hip = float(np.max(np.abs(pitch_delta_joints[0::3])))
-        pitch_sagittal = float(np.max(np.abs(np.concatenate((
-            pitch_delta_joints[1::3], pitch_delta_joints[2::3],
-        )))))
-        self.last_ik_pitch_hip_to_sagittal_ratio = (
-            pitch_hip / pitch_sagittal
-            if pitch_sagittal > 1.0e-12
-            else (MAX_BOUND if pitch_hip > 1.0e-12 else 0.0)
-        )
-
-        roll_delta = np.asarray((roll_requested, 0.0, 0.0))
-        roll_weights = np.tile(np.asarray((
-            self.config.hybrid_leveling_roll_hip_weight,
-            self.config.hybrid_leveling_roll_thigh_weight,
-            self.config.hybrid_leveling_roll_calf_weight,
-        )), 4)
-        roll = self._solve_axis_rotation(
-            state, contacts, pitch.positions, pitch.rotation,
-            roll_delta, np.arange(12), wbc_target, lower, upper,
-            roll_weights,
-            hip_limit_rad=self.config.maximum_roll_hip_correction_rad,
-        )
-        roll_delta_joints = roll.positions - pitch.positions
-        roll_hip = float(np.max(np.abs(roll_delta_joints[0::3])))
-
-        yaw_delta = np.asarray((0.0, 0.0, leg_yaw_requested))
-        yaw_weights = np.tile(np.asarray((
-            self.config.hybrid_leveling_yaw_hip_weight,
-            self.config.hybrid_leveling_yaw_thigh_weight,
-            self.config.hybrid_leveling_yaw_calf_weight,
-        )), 4)
-        yaw = self._solve_axis_rotation(
-            state, contacts, roll.positions, roll.rotation,
-            yaw_delta, np.arange(12), wbc_target, lower, upper,
-            yaw_weights,
-        )
-        accepted_rotation = np.asarray(pin.log3(
-            dynamics.base_rotation.T @ yaw.rotation
-        ))
-        self.last_leveling_orientation_body = accepted_rotation.copy()
-        requested_norm = float(np.linalg.norm(requested))
-        authority = clamp(
-            float(np.linalg.norm(accepted_rotation))
-            / max(requested_norm, 1.0e-12),
-            0.0, 1.0,
-        )
-        iterations = pitch.iterations + roll.iterations + yaw.iterations
-        condition = max(
-            pitch.condition_number,
-            roll.condition_number,
-            yaw.condition_number,
-        )
-        singular_values = [
-            item.minimum_singular_value
-            for item in (pitch, roll, yaw)
-            if item.attempted
-        ]
-        minimum_singular = min(singular_values, default=0.0)
-        residuals = [
-            item.residual_m for item in (pitch, roll, yaw)
-            if item.attempted
-        ]
-        allocation_residual = max(residuals, default=0.0)
-        allocation_degraded = any((
-            abs(pitch_requested) > 1.0e-12
-            and pitch.accepted_fraction < 1.0,
-            abs(roll_requested) > 1.0e-12
-            and roll.accepted_fraction < 1.0,
-            abs(leg_yaw_requested) > 1.0e-12
-            and yaw.accepted_fraction < 1.0,
-        ))
-        return HybridIkTarget(
-            positions=yaw.positions,
-            base_rotation=yaw.rotation,
-            iterations=iterations,
-            condition_number=condition,
-            minimum_singular_value=minimum_singular,
-            authority_scale=authority,
-            requested_rotation_body=tuple(requested),
-            pitch_requested_rad=pitch_requested,
-            pitch_accepted_fraction=pitch.accepted_fraction,
-            pitch_final_residual_m=pitch.residual_m,
-            pitch_max_hip_delta_rad=pitch_hip,
-            pitch_max_sagittal_delta_rad=pitch_sagittal,
-            roll_requested_rad=roll_requested,
-            roll_accepted_fraction=roll.accepted_fraction,
-            roll_final_residual_m=roll.residual_m,
-            roll_max_hip_delta_rad=roll_hip,
-            leg_yaw_requested_rad=leg_yaw_requested,
-            leg_yaw_accepted_fraction=yaw.accepted_fraction,
-            allocation_attempted=any(
-                item.attempted for item in (pitch, roll, yaw)
-            ),
-            allocation_residual_m=allocation_residual,
-            allocation_degraded=allocation_degraded,
-        )
-
-    def _record_ik_diagnostics(
-        self,
-        state: EstimatedState,
-        contacts: Mapping[str, ContactFrame],
-        ik_target: HybridIkTarget,
-        realized_base_rotation: np.ndarray,
-        realized_positions: np.ndarray,
-    ) -> None:
-        targets = np.vstack([contacts[leg].point for leg in LEGS])
-        try:
-            q = self._configuration_with_leg_target(
-                state, realized_base_rotation, realized_positions,
-            )
-            _, _, points, singular, condition = self._ik_contact_system(
-                q, contacts,
-            )
-        except (ValueError, np.linalg.LinAlgError):
-            self.leveling_solve_fallbacks += 1
-            points = targets.copy()
-            singular = 0.0
-            condition = MAX_BOUND
-            points[0, 0] += (
-                self.config.hybrid_leveling_contact_hard_limit_m + 1.0e-6
-            )
-        self.last_ik_contact_residuals = np.linalg.norm(
-            points - targets, axis=1,
-        )
-        self.last_ik_final_command_residual_m = float(
-            np.max(self.last_ik_contact_residuals)
-        )
-        (
-            self.last_ik_wheelbase_before,
-            self.last_ik_axle_width_before,
-        ) = self._contact_geometry(targets)
-        (
-            self.last_ik_wheelbase_after,
-            self.last_ik_axle_width_after,
-        ) = self._contact_geometry(points)
-        self.last_ik_minimum_joint_limit_margin_rad = (
-            self._minimum_joint_limit_margin(realized_positions)
-        )
-        self.last_ik_condition_number = max(
-            ik_target.condition_number, condition,
-        )
-        self.last_ik_minimum_singular_value = min(
-            ik_target.minimum_singular_value, singular,
-        )
-        self.last_ik_iterations = ik_target.iterations
-        self.last_ik_authority_scale = (
-            self.last_ik_selected_correction_fraction
-            if self.last_ik_correction_requested
-            else ik_target.authority_scale
-        )
-
-    def _final_leg_candidate(
-        self,
-        positions: np.ndarray,
-        wbc_target: np.ndarray,
-        leveling_delta: np.ndarray,
-        lower: np.ndarray,
-        upper: np.ndarray,
-    ) -> np.ndarray:
-        """Apply both command rate limits and joint clipping without state lag."""
-        bounded_leveling = np.clip(
-            leveling_delta,
-            -self.config.maximum_leveling_joint_step_rad,
-            self.config.maximum_leveling_joint_step_rad,
-        )
-        raw = np.clip(wbc_target + bounded_leveling, lower, upper)
-        reference = positions if self.last_leg_command is None else self.last_leg_command
-        return np.clip(
-            np.clip(
-                raw,
-                reference - self.config.max_leg_position_step_rad,
-                reference + self.config.max_leg_position_step_rad,
-            ),
-            lower, upper,
-        )
-
-    def _candidate_contact_residual(
-        self,
-        state: EstimatedState,
-        contacts: Mapping[str, ContactFrame],
-        base_rotation: np.ndarray,
-        positions: np.ndarray,
-    ) -> float:
-        q = self._configuration_with_leg_target(
-            state, base_rotation, positions,
-        )
-        _, _, points, _, _ = self._ik_contact_system(q, contacts)
-        targets = np.vstack([contacts[leg].point for leg in LEGS])
-        residual = float(np.max(np.linalg.norm(points - targets, axis=1)))
-        if not math.isfinite(residual):
-            raise ValueError('NONFINITE_HYBRID_IK_FINAL_RESIDUAL')
-        return residual
-
-    def _update_ik_residual_supervision(
-        self,
-        final_residual: float,
-        residual_state: str,
-        correction_requested: bool,
-        nonzero_candidate_attempted: bool,
-        selected_fraction: float,
-    ) -> None:
-        """Count only genuine fallback rejections as fatal persistence."""
-        valid_states = {
-            IK_RESIDUAL_NO_CORRECTION_NEEDED,
-            IK_RESIDUAL_ACCEPTED,
-            IK_RESIDUAL_DEGRADED,
-            IK_RESIDUAL_REJECTED,
-            IK_RESIDUAL_HARD_REJECTED,
-        }
-        if residual_state not in valid_states:
-            raise ValueError(f'INVALID_HYBRID_IK_RESIDUAL_STATE:{residual_state}')
-        if not finite(final_residual, selected_fraction):
-            raise ValueError('NONFINITE_HYBRID_IK_RESIDUAL_SUPERVISION')
-        if residual_state == IK_RESIDUAL_NO_CORRECTION_NEEDED:
-            if correction_requested:
-                raise ValueError('INVALID_NO_CORRECTION_IK_RESIDUAL_STATE')
-            self.ik_residual_rejection_count = 0
-            self.consecutive_ik_residual_failures = 0
-            self.last_ik_speed_scale = 1.0
-            return
-        safe_degraded = (
-            residual_state == IK_RESIDUAL_DEGRADED
-            and correction_requested
-            and selected_fraction > 0.0
-            and final_residual
-            <= self.config.hybrid_leveling_contact_soft_limit_m
-        )
-        if safe_degraded:
-            self.ik_degraded_count += 1
-        genuine_rejection = (
-            self.config.hybrid_leveling_enabled
-            and correction_requested
-            and nonzero_candidate_attempted
-            and selected_fraction <= 0.0
-            and residual_state in {
-                IK_RESIDUAL_REJECTED,
-                IK_RESIDUAL_HARD_REJECTED,
-            }
-        )
-        if genuine_rejection:
-            self.consecutive_ik_residual_failures += 1
-        else:
-            self.consecutive_ik_residual_failures = 0
-        if genuine_rejection:
-            self.ik_residual_rejection_count += 1
-        else:
-            self.ik_residual_rejection_count = 0
-        if not self.config.hybrid_ik_speed_reduction_enabled:
-            self.last_ik_speed_scale = 1.0
-            return
-        soft = self.config.hybrid_ik_speed_soft_residual_m
-        hard = self.config.hybrid_ik_speed_hard_residual_m
-        if final_residual <= soft:
-            residual_scale = 1.0
-        elif final_residual >= hard:
-            residual_scale = self.config.hybrid_ik_minimum_speed_scale
-        else:
-            ratio = (final_residual - soft) / (hard - soft)
-            smooth = ratio * ratio * (3.0 - 2.0 * ratio)
-            residual_scale = 1.0 - smooth * (
-                1.0 - self.config.hybrid_ik_minimum_speed_scale
-            )
-        persistence = self._smooth_authority(
-            self.ik_residual_rejection_count
-            / self.config.hybrid_leveling_residual_failure_cycles
-        )
-        persistent_scale = 1.0 - persistence * (
-            1.0 - self.config.hybrid_ik_minimum_speed_scale
-        )
-        self.last_ik_speed_scale = clamp(
-            min(residual_scale, persistent_scale),
-            self.config.hybrid_ik_minimum_speed_scale, 1.0,
-        )
-
-    def persistent_ik_residual_failure(self) -> bool:
-        """Return true only for persistent genuine fallback rejections."""
-        return (
-            self.last_ik_correction_requested
-            and self.last_ik_residual_state in {
-                IK_RESIDUAL_REJECTED,
-                IK_RESIDUAL_HARD_REJECTED,
-            }
-            and self.consecutive_ik_residual_failures
-            >= self.config.hybrid_leveling_residual_failure_cycles
-        )
-
-    def _residual_safe_leg_target(
-        self,
-        state: EstimatedState,
-        dynamics: DynamicsSnapshot,
-        contacts: Mapping[str, ContactFrame],
-        ik_target: HybridIkTarget,
-        positions: np.ndarray,
-        wbc_target: np.ndarray,
-        lower: np.ndarray,
-        upper: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Gate the exact publishable command without erasing original demand."""
-        rotation_delta = np.asarray(pin.log3(
-            dynamics.base_rotation.T @ ik_target.base_rotation
-        ))
-        requested_rotation = np.asarray(
-            ik_target.requested_rotation_body, dtype=float,
-        )
-        if requested_rotation.shape != (3,) or not finite(
-            rotation_delta, requested_rotation,
-        ):
-            raise ValueError('NONFINITE_HYBRID_IK_CORRECTION')
-        rotation_delta_norm = float(np.linalg.norm(rotation_delta))
-        requested_norm = float(np.linalg.norm(requested_rotation))
-        request_evidence_available = requested_norm > 1.0e-12
-        # Preserve compatibility with synthetic/older targets while real
-        # allocator targets always carry the pre-allocation bounded demand.
-        if not request_evidence_available and rotation_delta_norm > 1.0e-12:
-            requested_rotation = rotation_delta.copy()
-            requested_norm = rotation_delta_norm
-        orientation_deadband_rad = math.radians(max(
-            self.config.orientation_deadband_deg,
-            self.config.hybrid_leveling_axis_deadband_deg,
-        ))
-        correction_requested = (
-            self.config.hybrid_leveling_enabled
-            and requested_norm > orientation_deadband_rad
-        )
-        self.last_ik_correction_requested = correction_requested
-
-        def contact_residual(
-            rotation: np.ndarray,
-            leg: np.ndarray,
-        ) -> float:
-            try:
-                return self._candidate_contact_residual(
-                    state, contacts, rotation, leg,
-                )
-            except (ValueError, np.linalg.LinAlgError):
-                return math.inf
-
-        tolerance = self.config.hybrid_leveling_contact_tolerance_m
-        soft = self.config.hybrid_leveling_contact_soft_limit_m
-        hard = self.config.hybrid_leveling_contact_hard_limit_m
-        wbc_only_leg = self._final_leg_candidate(
-            positions, wbc_target, np.zeros(12), lower, upper,
-        )
-        baseline_leg = wbc_only_leg
-        baseline_rotation = dynamics.base_rotation.copy()
-        wbc_baseline_residual = contact_residual(
-            baseline_rotation, baseline_leg,
-        )
-        baseline_residual = wbc_baseline_residual
-        # If the rate-limited WBC-only target is already geometrically unsafe,
-        # allocate orientation from the safe measured-position hold. Otherwise
-        # every correction fraction inherits the unrelated baseline violation.
-        if baseline_residual > hard:
-            baseline_leg = np.clip(positions, lower, upper)
-            baseline_residual = contact_residual(
-                baseline_rotation, baseline_leg,
-            )
-        if baseline_residual > hard:
-            raise ValueError('HYBRID_IK_RESIDUAL_SAFE_HOLD_UNAVAILABLE')
-        desired_correction = np.clip(
-            ik_target.positions - baseline_leg,
-            -self.config.maximum_leveling_joint_correction_rad,
-            self.config.maximum_leveling_joint_correction_rad,
-        )
-
-        def candidate(fraction: float) -> tuple[np.ndarray, np.ndarray, float]:
-            if fraction <= 0.0:
-                return (
-                    baseline_leg.copy(), baseline_rotation.copy(),
-                    baseline_residual,
-                )
-            leg = self._final_leg_candidate(
-                positions, baseline_leg,
-                fraction * desired_correction,
-                lower, upper,
-            )
-            rotation = dynamics.base_rotation @ pin.exp3(
-                fraction * rotation_delta
-            )
-            return leg, rotation, contact_residual(rotation, leg)
-
-        allocation_available = rotation_delta_norm > 1.0e-12
-        nonzero_candidate_attempted = (
-            ik_target.allocation_attempted or allocation_available
-        )
-        gate_fraction = 0.0
-        if not correction_requested:
-            selected_leg, selected_rotation, selected_residual = candidate(0.0)
-            self.last_ik_candidate_residual_m = wbc_baseline_residual
-            residual_state = IK_RESIDUAL_NO_CORRECTION_NEEDED
-        elif not allocation_available:
-            selected_leg, selected_rotation, selected_residual = candidate(0.0)
-            self.last_ik_candidate_residual_m = (
-                ik_target.allocation_residual_m
-                if math.isfinite(ik_target.allocation_residual_m)
-                else selected_residual
-            )
-            residual_state = IK_RESIDUAL_REJECTED
-        else:
-            selected_leg, selected_rotation, selected_residual = candidate(1.0)
-            self.last_ik_candidate_residual_m = selected_residual
-            gate_fraction = 1.0
-            residual_state = (
-                IK_RESIDUAL_DEGRADED
-                if ik_target.allocation_degraded else IK_RESIDUAL_ACCEPTED
-            )
-            if selected_residual > tolerance:
-                gate_fraction = 0.0
-                rejection_state = (
-                    IK_RESIDUAL_HARD_REJECTED
-                    if selected_residual > hard else IK_RESIDUAL_REJECTED
-                )
-                degraded_candidate: tuple[
-                    np.ndarray, np.ndarray, float, float,
-                ] | None = None
-                for step_index in range(
-                    1, self.config.hybrid_leveling_max_backtracking_steps
-                ):
-                    fraction = (
-                        self.config.hybrid_leveling_backtracking_factor
-                        ** step_index
-                    )
-                    trial_leg, trial_rotation, trial_residual = candidate(
-                        fraction
-                    )
-                    if trial_residual <= tolerance:
-                        selected_leg = trial_leg
-                        selected_rotation = trial_rotation
-                        selected_residual = trial_residual
-                        gate_fraction = fraction
-                        residual_state = (
-                            IK_RESIDUAL_DEGRADED
-                            if ik_target.allocation_degraded or fraction < 1.0
-                            else IK_RESIDUAL_ACCEPTED
-                        )
-                        break
-                    if trial_residual <= soft and (
-                        degraded_candidate is None
-                        or trial_residual < degraded_candidate[2]
-                    ):
-                        degraded_candidate = (
-                            trial_leg, trial_rotation, trial_residual, fraction,
-                        )
-                if gate_fraction == 0.0 and degraded_candidate is not None:
-                    (
-                        selected_leg, selected_rotation,
-                        selected_residual, gate_fraction,
-                    ) = degraded_candidate
-                    residual_state = IK_RESIDUAL_DEGRADED
-                if gate_fraction == 0.0:
-                    selected_leg, selected_rotation, selected_residual = (
-                        candidate(0.0)
-                    )
-                    residual_state = rejection_state
-        self.last_leveling_correction = selected_leg - wbc_only_leg
-        self.last_leveling_target = selected_leg.copy()
-        self.last_leveling_orientation_body = np.asarray(pin.log3(
-            dynamics.base_rotation.T @ selected_rotation
-        ))
-        aggregate_fraction = (
-            clamp(ik_target.authority_scale * gate_fraction, 0.0, 1.0)
-            if correction_requested else 0.0
-        )
-        if residual_state == IK_RESIDUAL_DEGRADED and not (
-            correction_requested
-            and aggregate_fraction > 0.0
-            and selected_residual <= soft
-        ):
-            residual_state = (
-                IK_RESIDUAL_HARD_REJECTED
-                if selected_residual > hard else IK_RESIDUAL_REJECTED
-            )
-        self.last_ik_selected_correction_fraction = aggregate_fraction
-        self.last_ik_pitch_requested_rad = ik_target.pitch_requested_rad
-        self.last_ik_pitch_accepted_fraction = (
-            ik_target.pitch_accepted_fraction * gate_fraction
-        )
-        self.last_ik_pitch_final_residual_m = selected_residual
-        self.last_ik_pitch_max_hip_delta_rad = (
-            ik_target.pitch_max_hip_delta_rad * gate_fraction
-        )
-        pitch_sagittal = (
-            ik_target.pitch_max_sagittal_delta_rad * gate_fraction
-        )
-        self.last_ik_pitch_hip_to_sagittal_ratio = (
-            self.last_ik_pitch_max_hip_delta_rad / pitch_sagittal
-            if pitch_sagittal > 1.0e-12
-            else (
-                MAX_BOUND
-                if self.last_ik_pitch_max_hip_delta_rad > 1.0e-12
-                else 0.0
-            )
-        )
-        self.last_ik_roll_requested_rad = ik_target.roll_requested_rad
-        self.last_ik_roll_accepted_fraction = (
-            ik_target.roll_accepted_fraction * gate_fraction
-        )
-        self.last_ik_roll_final_residual_m = selected_residual
-        self.last_ik_roll_max_hip_delta_rad = (
-            ik_target.roll_max_hip_delta_rad * gate_fraction
-        )
-        self.last_ik_leg_yaw_requested_rad = (
-            ik_target.leg_yaw_requested_rad
-        )
-        self.last_ik_leg_yaw_accepted_fraction = (
-            ik_target.leg_yaw_accepted_fraction * gate_fraction
-        )
-        self.last_ik_final_command_residual_m = selected_residual
-        self.last_ik_residual_state = residual_state
-        self._update_ik_residual_supervision(
-            selected_residual,
-            residual_state,
-            correction_requested,
-            nonzero_candidate_attempted,
-            aggregate_fraction,
-        )
-        return selected_leg, selected_rotation
 
     def propose(
         self,
@@ -3660,9 +2157,6 @@ class HybridPositionVelocityAdapter:
         result: QpResult,
         effective_speed: float,
         dt: float,
-        dynamics: DynamicsSnapshot | None = None,
-        contacts: Mapping[str, ContactFrame] | None = None,
-        target: PostureTarget | None = None,
     ) -> HybridCommand:
         dt = clamp(dt, 1.0e-4, 0.05)
         positions = np.asarray([
@@ -3683,130 +2177,45 @@ class HybridPositionVelocityAdapter:
             ]
             for name in LEG_JOINT_NAMES
         ]) / self.config.virtual_leg_stiffness_nm_rad
-        wbc_target = positions + velocities * dt + 0.5 * accelerations * dt * dt
-        wbc_target += torque_correction
-        lower, upper = self._safe_joint_bounds()
-        wbc_target = np.clip(wbc_target, lower, upper)
-        self.last_wbc_joint_delta = wbc_target - positions
-        ik_target: HybridIkTarget | None = None
-        realized_rotation = (
-            dynamics.base_rotation.copy() if dynamics is not None else np.eye(3)
+        raw = positions + velocities * dt + 0.5 * accelerations * dt * dt
+        raw += torque_correction
+        reference = positions if self.last_leg_command is None else self.last_leg_command
+        leg = np.clip(
+            raw,
+            reference - self.config.max_leg_position_step_rad,
+            reference + self.config.max_leg_position_step_rad,
         )
-        if dynamics is not None and contacts is not None and target is not None:
-            ik_target = self._leveling_joint_target(
-                state, dynamics, contacts, target, wbc_target,
-            )
-            if self.ik_data is not None:
-                leg, realized_rotation = self._residual_safe_leg_target(
-                    state, dynamics, contacts, ik_target,
-                    positions, wbc_target, lower, upper,
-                )
-            else:
-                leg = self._final_leg_candidate(
-                    positions, wbc_target, np.zeros(12), lower, upper,
-                )
-                self.last_leveling_correction[:] = 0.0
-                self.last_leveling_target = leg.copy()
-                self.last_ik_contact_residuals[:] = 0.0
-                self.last_ik_iterations = 0
-                self.last_ik_authority_scale = 0.0
-                self.last_ik_selected_correction_fraction = 0.0
-                self.last_ik_candidate_residual_m = 0.0
-                self.last_ik_final_command_residual_m = 0.0
-                self.last_ik_residual_state = IK_RESIDUAL_NO_CORRECTION_NEEDED
-                self.last_ik_correction_requested = False
-                self.last_ik_original_rotation_error_body[:] = 0.0
-                self.last_ik_bounded_requested_rotation_body[:] = 0.0
-                self.last_ik_pitch_requested_rad = 0.0
-                self.last_ik_pitch_accepted_fraction = 0.0
-                self.last_ik_pitch_final_residual_m = 0.0
-                self.last_ik_pitch_max_hip_delta_rad = 0.0
-                self.last_ik_roll_requested_rad = 0.0
-                self.last_ik_roll_accepted_fraction = 0.0
-                self.last_ik_roll_final_residual_m = 0.0
-                self.last_ik_roll_max_hip_delta_rad = 0.0
-                self.last_ik_leg_yaw_requested_rad = 0.0
-                self.last_ik_leg_yaw_accepted_fraction = 0.0
-                self.ik_residual_rejection_count = 0
-                self.consecutive_ik_residual_failures = 0
-                self.last_ik_speed_scale = 1.0
-        else:
-            self.last_leveling_orientation_body[:] = 0.0
-            self.last_leveling_correction[:] = 0.0
-            self._axis_aware_joint_regularization(np.zeros(3))
-            leg = self._final_leg_candidate(
-                positions, wbc_target, np.zeros(12), lower, upper,
-            )
-            self.last_leveling_target = leg.copy()
-            self.last_ik_contact_residuals[:] = 0.0
-            self.last_ik_iterations = 0
-            self.last_ik_authority_scale = 0.0
-            self.last_ik_selected_correction_fraction = 0.0
-            self.last_ik_candidate_residual_m = 0.0
-            self.last_ik_final_command_residual_m = 0.0
-            self.last_ik_residual_state = IK_RESIDUAL_NO_CORRECTION_NEEDED
-            self.last_ik_correction_requested = False
-            self.last_ik_original_rotation_error_body[:] = 0.0
-            self.last_ik_bounded_requested_rotation_body[:] = 0.0
-            self.last_ik_pitch_requested_rad = 0.0
-            self.last_ik_pitch_accepted_fraction = 0.0
-            self.last_ik_pitch_final_residual_m = 0.0
-            self.last_ik_pitch_max_hip_delta_rad = 0.0
-            self.last_ik_roll_requested_rad = 0.0
-            self.last_ik_roll_accepted_fraction = 0.0
-            self.last_ik_roll_final_residual_m = 0.0
-            self.last_ik_roll_max_hip_delta_rad = 0.0
-            self.last_ik_leg_yaw_requested_rad = 0.0
-            self.last_ik_leg_yaw_accepted_fraction = 0.0
-            self.ik_residual_rejection_count = 0
-            self.consecutive_ik_residual_failures = 0
-            self.last_ik_speed_scale = 1.0
-        if (
-            ik_target is not None and self.ik_data is not None
-            and contacts is not None
-        ):
-            self._record_ik_diagnostics(
-                state, contacts, ik_target, realized_rotation, leg,
-            )
-            if self.last_ik_final_command_residual_m > (
-                self.config.hybrid_leveling_contact_hard_limit_m
-            ):
-                raise ValueError('HYBRID_IK_FINAL_COMMAND_RESIDUAL')
+        leg = np.clip(
+            leg,
+            self.robot.position_lower + self.config.joint_limit_margin_rad,
+            self.robot.position_upper - self.config.joint_limit_margin_rad,
+        )
         wheel = np.zeros(4)
-        target_speed = effective_speed / self.robot.wheel_radius
-        reverse_limit = (
-            self.config.maximum_reverse_stabilization_wheel_speed_radps
-        )
-        for index, leg_name in enumerate(LEGS):
-            name = f'{leg_name}_foot_joint'
-            acceleration = result.qdd[self.robot.v_indices[name]]
-            integrated = self.last_wheel_command[index] + acceleration * dt
-            torque = result.tau[ACTUATED_JOINT_NAMES.index(name)]
-            torque_correction = clamp(
-                self.config.wheel_torque_velocity_gain_radps_per_nm * torque,
-                -self.config.maximum_torque_velocity_correction_radps,
-                self.config.maximum_torque_velocity_correction_radps,
-            )
-            dynamic_target = target_speed + torque_correction
-            blended = (
-                integrated
-                if effective_speed <= 1.0e-6
-                else 0.65 * integrated + 0.35 * dynamic_target
-            )
-            bounded_target = clamp(
-                blended,
-                -reverse_limit,
-                self.config.maximum_wheel_speed_radps,
-            )
-            wheel[index] = rate_limit(
-                self.last_wheel_command[index], bounded_target,
-                self.config.max_wheel_accel_radps2, dt,
-            )
-        wheel = np.clip(
-            wheel,
-            -reverse_limit,
-            self.config.maximum_wheel_speed_radps,
-        )
+        target_speed = max(0.0, effective_speed) / self.robot.wheel_radius
+        if effective_speed <= 1.0e-6:
+            for index in range(4):
+                wheel[index] = rate_limit(
+                    self.last_wheel_command[index], 0.0,
+                    self.config.max_wheel_accel_radps2, dt,
+                )
+        else:
+            for index, leg_name in enumerate(LEGS):
+                name = f'{leg_name}_foot_joint'
+                acceleration = result.qdd[self.robot.v_indices[name]]
+                integrated = self.last_wheel_command[index] + acceleration * dt
+                torque = result.tau[ACTUATED_JOINT_NAMES.index(name)]
+                torque_correction = clamp(
+                    self.config.wheel_torque_velocity_gain_radps_per_nm * torque,
+                    -self.config.maximum_torque_velocity_correction_radps,
+                    self.config.maximum_torque_velocity_correction_radps,
+                )
+                dynamic_target = max(0.0, target_speed + torque_correction)
+                blended = 0.65 * integrated + 0.35 * dynamic_target
+                wheel[index] = rate_limit(
+                    self.last_wheel_command[index], max(0.0, blended),
+                    self.config.max_wheel_accel_radps2, dt,
+                )
+        wheel = np.clip(wheel, 0.0, self.config.maximum_wheel_speed_radps)
         if not finite(leg, wheel):
             raise ValueError('NONFINITE_HYBRID_COMMAND')
         self.last_leg_command = leg.copy()
@@ -3825,45 +2234,6 @@ class HybridPositionVelocityAdapter:
 
     def stop(self, hold_positions: np.ndarray | None = None) -> None:
         self.last_wheel_command[:] = 0.0
-        self.last_leveling_orientation_body[:] = 0.0
-        self.last_ik_original_rotation_error_body[:] = 0.0
-        self.last_ik_bounded_requested_rotation_body[:] = 0.0
-        self.last_leveling_correction[:] = 0.0
-        self.last_wbc_joint_delta[:] = 0.0
-        self.last_leveling_target[:] = 0.0
-        self.last_ik_contact_residuals[:] = 0.0
-        self.last_ik_wheelbase_before[:] = 0.0
-        self.last_ik_wheelbase_after[:] = 0.0
-        self.last_ik_axle_width_before[:] = 0.0
-        self.last_ik_axle_width_after[:] = 0.0
-        self.last_ik_minimum_joint_limit_margin_rad = 0.0
-        self.last_ik_condition_number = 0.0
-        self.last_ik_minimum_singular_value = 0.0
-        self.last_ik_iterations = 0
-        self.last_ik_authority_scale = 0.0
-        self.last_ik_selected_correction_fraction = 0.0
-        self.last_ik_candidate_residual_m = 0.0
-        self.last_ik_final_command_residual_m = 0.0
-        self.last_ik_residual_state = IK_RESIDUAL_NO_CORRECTION_NEEDED
-        self.last_ik_correction_requested = False
-        self.ik_residual_rejection_count = 0
-        self.consecutive_ik_residual_failures = 0
-        self.ik_degraded_count = 0
-        self.last_ik_pitch_hip_to_sagittal_ratio = 0.0
-        self.last_ik_pitch_requested_rad = 0.0
-        self.last_ik_pitch_accepted_fraction = 0.0
-        self.last_ik_pitch_final_residual_m = 0.0
-        self.last_ik_pitch_max_hip_delta_rad = 0.0
-        self.last_ik_roll_requested_rad = 0.0
-        self.last_ik_roll_accepted_fraction = 0.0
-        self.last_ik_roll_final_residual_m = 0.0
-        self.last_ik_roll_max_hip_delta_rad = 0.0
-        self.last_ik_leg_yaw_requested_rad = 0.0
-        self.last_ik_leg_yaw_accepted_fraction = 0.0
-        self.last_ik_axis_fractions[:] = 0.0
-        self.last_ik_axis_mode = 'none'
-        self.last_ik_joint_regularization[:] = 1.0
-        self.last_ik_speed_scale = 1.0
         if self.wheel_publisher is not None:
             wheel = Float64MultiArray()
             wheel.data = [0.0] * 4
@@ -3878,46 +2248,6 @@ class HybridPositionVelocityAdapter:
     def reset(self) -> None:
         self.last_leg_command = None
         self.last_wheel_command[:] = 0.0
-        self.last_leveling_orientation_body[:] = 0.0
-        self.last_ik_original_rotation_error_body[:] = 0.0
-        self.last_ik_bounded_requested_rotation_body[:] = 0.0
-        self.last_leveling_correction[:] = 0.0
-        self.last_wbc_joint_delta[:] = 0.0
-        self.last_leveling_target[:] = 0.0
-        self.last_ik_contact_residuals[:] = 0.0
-        self.last_ik_wheelbase_before[:] = 0.0
-        self.last_ik_wheelbase_after[:] = 0.0
-        self.last_ik_axle_width_before[:] = 0.0
-        self.last_ik_axle_width_after[:] = 0.0
-        self.last_ik_minimum_joint_limit_margin_rad = 0.0
-        self.last_ik_condition_number = 0.0
-        self.last_ik_minimum_singular_value = 0.0
-        self.last_ik_iterations = 0
-        self.last_ik_authority_scale = 0.0
-        self.last_ik_selected_correction_fraction = 0.0
-        self.last_ik_candidate_residual_m = 0.0
-        self.last_ik_final_command_residual_m = 0.0
-        self.last_ik_residual_state = IK_RESIDUAL_NO_CORRECTION_NEEDED
-        self.last_ik_correction_requested = False
-        self.ik_residual_rejection_count = 0
-        self.consecutive_ik_residual_failures = 0
-        self.ik_degraded_count = 0
-        self.last_ik_pitch_hip_to_sagittal_ratio = 0.0
-        self.last_ik_pitch_requested_rad = 0.0
-        self.last_ik_pitch_accepted_fraction = 0.0
-        self.last_ik_pitch_final_residual_m = 0.0
-        self.last_ik_pitch_max_hip_delta_rad = 0.0
-        self.last_ik_roll_requested_rad = 0.0
-        self.last_ik_roll_accepted_fraction = 0.0
-        self.last_ik_roll_final_residual_m = 0.0
-        self.last_ik_roll_max_hip_delta_rad = 0.0
-        self.last_ik_leg_yaw_requested_rad = 0.0
-        self.last_ik_leg_yaw_accepted_fraction = 0.0
-        self.last_ik_axis_fractions[:] = 0.0
-        self.last_ik_axis_mode = 'none'
-        self.last_ik_joint_regularization[:] = 1.0
-        self.last_ik_speed_scale = 1.0
-        self.leveling_solve_fallbacks = 0
 
 
 class RunLogger:
@@ -3932,40 +2262,12 @@ class RunLogger:
         'terrain_rear_local_valid', 'imu_pitch_deg',
         'base_linear_velocity_body', 'imu_angular_velocity',
         'imu_linear_acceleration', 'com_position', 'com_velocity',
-        'desired_com_acceleration', 'orientation_error_body_rad',
-        'orientation_angular_target_radps2',
-        'leveling_orientation_correction_body_rad',
-        'optimized_base_angular_qdd_radps2', 'pitch_deg', 'pitch_target_deg',
-        'pitch_error_deg', 'roll_deg', 'yaw_deg', 'roll_target_deg',
-        'yaw_target_deg', 'roll_error_deg', 'yaw_error_deg',
-        'q', 'v', 'qdd', 'measured_leg_positions',
-        'measured_leg_velocities', 'joint_limit_margin_rad',
-        'desired_torque', 'torque_utilization',
-        'wbc_joint_delta_rad', 'leveling_joint_delta_rad',
-        'ik_contact_residuals_m', 'ik_max_contact_residual_m',
-        'ik_wheelbase_before_m', 'ik_wheelbase_after_m',
-        'ik_axle_width_before_m', 'ik_axle_width_after_m',
-        'ik_minimum_joint_limit_margin_rad', 'ik_jacobian_condition',
-        'ik_minimum_singular_value', 'ik_iterations', 'ik_fallback_count',
-        'ik_authority_scale', 'ik_selected_correction_fraction',
-        'ik_candidate_residual_m', 'ik_final_command_residual_m',
-        'ik_residual_state', 'ik_correction_requested',
-        'ik_consecutive_residual_failures', 'ik_residual_rejection_count',
-        'ik_degraded_count',
-        'ik_pitch_hip_to_sagittal_ratio', 'ik_axis_roll_fraction',
-        'ik_axis_pitch_fraction', 'ik_axis_yaw_fraction', 'ik_speed_scale',
-        'ik_pitch_requested_rad', 'ik_pitch_accepted_fraction',
-        'ik_pitch_final_residual_m', 'ik_pitch_max_hip_delta_rad',
-        'ik_roll_requested_rad', 'ik_roll_accepted_fraction',
-        'ik_roll_final_residual_m', 'ik_roll_max_hip_delta_rad',
-        'ik_leg_yaw_requested_rad', 'ik_leg_yaw_accepted_fraction',
-        'final_leg_position_command', 'published_leg_command',
-        'published_wheel_command', 'contact_forces_world',
+        'desired_com_acceleration', 'pitch_deg', 'pitch_target_deg',
+        'pitch_error_deg', 'roll_deg', 'q', 'v', 'qdd', 'desired_torque',
+        'published_leg_command', 'published_wheel_command', 'contact_forces_world',
         'contact_force_components', 'friction_utilization', 'slip',
         'qp_status', 'solver_runtime_ms', 'solver_iterations', 'solver_objective',
-        'primal_residual', 'dual_residual', 'qp_violation_category',
-        'qp_violation_name', 'qp_violation_value', 'qp_violation_bound',
-        'qp_violation_amount', 'longitudinal_margin_m',
+        'primal_residual', 'dual_residual', 'longitudinal_margin_m',
         'lateral_margin_m', 'requested_speed_mps', 'effective_speed_mps',
         'safety_reason', 'result', 'state_update_ms', 'dynamics_ms',
         'qp_assembly_and_solve_ms', 'total_cycle_ms', 'deadline_missed',
@@ -4038,19 +2340,8 @@ class RunLogger:
         for name in (
             'base_position', 'base_quaternion', 'base_linear_velocity_body',
             'imu_angular_velocity', 'imu_linear_acceleration', 'com_position',
-            'com_velocity', 'desired_com_acceleration',
-            'orientation_error_body_rad',
-            'orientation_angular_target_radps2',
-            'leveling_orientation_correction_body_rad',
-            'optimized_base_angular_qdd_radps2', 'q', 'v', 'qdd',
-            'measured_leg_positions', 'measured_leg_velocities',
-            'joint_limit_margin_rad', 'desired_torque',
-            'wbc_joint_delta_rad',
-            'leveling_joint_delta_rad', 'final_leg_position_command',
-            'ik_contact_residuals_m', 'ik_wheelbase_before_m',
-            'ik_wheelbase_after_m', 'ik_axle_width_before_m',
-            'ik_axle_width_after_m',
-            'published_leg_command', 'published_wheel_command',
+            'com_velocity', 'desired_com_acceleration', 'q', 'v', 'qdd',
+            'desired_torque', 'published_leg_command', 'published_wheel_command',
             'contact_forces_world', 'contact_force_components',
             'friction_utilization', 'slip',
         ):
@@ -4073,7 +2364,14 @@ class RunLogger:
         torque_utilization: float,
         deadline_missed: bool,
     ) -> None:
-        del result
+        if result.status != 'MONITOR_NO_QP':
+            self.solver_attempts += 1
+            if result.success:
+                self.solver_successes += 1
+            else:
+                self.solver_failures += 1
+            self.solver_times.append(1000.0 * result.runtime_sec)
+            self.iterations.append(result.iterations)
         self.pitch_values.append(pitch_deg)
         self.roll_values.append(roll_deg)
         self.slips.extend(abs(float(value)) for value in slips)
@@ -4087,17 +2385,6 @@ class RunLogger:
         )
         self.deadline_misses += int(deadline_missed)
 
-    def observe_solver_attempt(self, result: QpResult) -> None:
-        """Count the raw candidate before any bounded last-safe fallback."""
-        if result.status != 'MONITOR_NO_QP':
-            self.solver_attempts += 1
-            if result.success:
-                self.solver_successes += 1
-            else:
-                self.solver_failures += 1
-            self.solver_times.append(1000.0 * result.runtime_sec)
-            self.iterations.append(result.iterations)
-
     def finalize(
         self,
         result: str,
@@ -4106,7 +2393,6 @@ class RunLogger:
         climb_top_result: bool,
         no_topple: bool,
         slope_result_deg: float,
-        qp_violation: QpConstraintViolation = QpConstraintViolation(),
     ) -> None:
         if self.finalized:
             return
@@ -4173,11 +2459,6 @@ class RunLogger:
                 self.front_rear_differences
             ),
             'terrain_estimator_result': terrain_estimator_result,
-            'final_qp_violation_category': qp_violation.category,
-            'final_qp_violation_name': qp_violation.name,
-            'final_qp_violation_value': qp_violation.value,
-            'final_qp_violation_bound': qp_violation.bound,
-            'final_qp_violation_amount': qp_violation.amount,
             'csv_path': str(self.csv_path),
             'result': result,
             'final_reason': reason,
@@ -4315,9 +2596,7 @@ class Go2WInverseDynamicsWbcNode(Node):
             for name, topic in {
                 'state': 'state', 'backend': 'backend',
                 'solver_status': 'solver/status',
-                'qp_violation': 'solver/constraint_violation',
                 'phase': 'terrain/contact_phase',
-                'ik_residual_state': 'hybrid_ik/residual_state',
             }.items()
         }
         self.bool_publishers = {
@@ -4334,7 +2613,6 @@ class Go2WInverseDynamicsWbcNode(Node):
                 'objective': 'solver/objective',
                 'primal': 'solver/primal_residual',
                 'dual': 'solver/dual_residual',
-                'qp_violation_amount': 'solver/constraint_violation_amount',
                 'slope': 'terrain/slope_deg',
                 'wheel_center_slope': 'terrain/wheel_center_slope_deg',
                 'pose_slope': 'terrain/pose_slope_deg',
@@ -4342,41 +2620,12 @@ class Go2WInverseDynamicsWbcNode(Node):
                 'front_local_slope': 'terrain/front_local_slope_deg',
                 'rear_local_slope': 'terrain/rear_local_slope_deg',
                 'roll': 'body/roll_deg', 'pitch': 'body/pitch_deg',
-                'yaw': 'body/yaw_deg',
                 'imu_pitch': 'body/imu_pitch_deg',
-                'roll_target': 'body/roll_target_deg',
                 'pitch_target': 'body/pitch_target_deg',
-                'yaw_target': 'body/yaw_target_deg',
                 'long_margin': 'stability/longitudinal_margin_m',
                 'lat_margin': 'stability/lateral_margin_m',
                 'speed_requested': 'speed/requested_mps',
                 'speed_effective': 'speed/effective_mps',
-                'ik_max_residual': 'hybrid_ik/max_contact_residual_m',
-                'ik_condition': 'hybrid_ik/jacobian_condition',
-                'ik_limit_margin': (
-                    'hybrid_ik/minimum_joint_limit_margin_rad'
-                ),
-                'ik_authority': 'hybrid_ik/authority_scale',
-                'ik_selected_fraction': (
-                    'hybrid_ik/selected_correction_fraction'
-                ),
-                'ik_candidate_residual': 'hybrid_ik/candidate_residual_m',
-                'ik_final_residual': 'hybrid_ik/final_command_residual_m',
-                'ik_pitch_hip_ratio': (
-                    'hybrid_ik/pitch_hip_to_sagittal_ratio'
-                ),
-                'ik_axis_roll': 'hybrid_ik/axis_roll_fraction',
-                'ik_axis_pitch': 'hybrid_ik/axis_pitch_fraction',
-                'ik_axis_yaw': 'hybrid_ik/axis_yaw_fraction',
-                'ik_speed_scale': 'hybrid_ik/speed_scale',
-                'ik_pitch_requested': 'hybrid_ik/pitch_requested_rad',
-                'ik_pitch_fraction': 'hybrid_ik/pitch_accepted_fraction',
-                'ik_pitch_residual': 'hybrid_ik/pitch_final_residual_m',
-                'ik_pitch_hip': 'hybrid_ik/pitch_max_hip_delta_rad',
-                'ik_roll_requested': 'hybrid_ik/roll_requested_rad',
-                'ik_roll_fraction': 'hybrid_ik/roll_accepted_fraction',
-                'ik_roll_hip': 'hybrid_ik/roll_max_hip_delta_rad',
-                'ik_leg_yaw_requested': 'hybrid_ik/leg_yaw_requested_rad',
                 **{
                     f'friction_{leg}': (
                         f'contact/{leg.lower()}/friction_utilization'
@@ -4384,34 +2633,15 @@ class Go2WInverseDynamicsWbcNode(Node):
                     for leg in LEGS
                 },
                 **{f'slip_{leg}': f'wheel/{leg.lower()}/slip' for leg in LEGS},
-                **{
-                    f'ik_residual_{leg}': (
-                        f'hybrid_ik/{leg.lower()}/contact_residual_m'
-                    )
-                    for leg in LEGS
-                },
             }.items()
         }
         self.iteration_publisher = self.create_publisher(
             UInt32, f'{prefix}/solver/iterations', 10,
         )
-        self.ik_iteration_publisher = self.create_publisher(
-            UInt32, f'{prefix}/hybrid_ik/iterations', 10,
-        )
-        self.ik_rejection_publisher = self.create_publisher(
-            UInt32, f'{prefix}/hybrid_ik/residual_rejection_count', 10,
-        )
         self.vector_publishers = {
             name: self.create_publisher(Vector3, f'{prefix}/{topic}', 10)
             for name, topic in {
                 'angular_velocity': 'body/angular_velocity',
-                'orientation_error': 'body/orientation_error',
-                'angular_acceleration_target': (
-                    'body/angular_acceleration_target'
-                ),
-                'optimized_angular_acceleration': (
-                    'body/optimized_angular_acceleration'
-                ),
                 'com_position': 'com/position', 'com_velocity': 'com/velocity',
                 'com_desired_acceleration': 'com/desired_acceleration',
                 **{f'force_{leg}': f'contact/{leg.lower()}/force' for leg in LEGS},
@@ -4425,9 +2655,6 @@ class Go2WInverseDynamicsWbcNode(Node):
         )
         self.proposed_joint_publisher = self.create_publisher(
             JointState, f'{prefix}/command/proposed_joint_state', 10,
-        )
-        self.leveling_joint_publisher = self.create_publisher(
-            JointState, f'{prefix}/command/leveling_joint_correction', 10,
         )
         self.proposed_wheel_publisher = self.create_publisher(
             Float64MultiArray, f'{prefix}/command/proposed_wheel_velocity', 10,
@@ -4647,8 +2874,6 @@ class Go2WInverseDynamicsWbcNode(Node):
             )
         if self.stop_requested or self.consecutive_solver_failures:
             speed *= max(0.0, 1.0 - 0.25 * self.consecutive_solver_failures)
-        if self.hybrid_adapter is not None:
-            speed *= self.hybrid_adapter.last_ik_speed_scale
         return clamp(speed, 0.0, self.config.commanded_speed_mps)
 
     def _solution_metrics(
@@ -4755,45 +2980,25 @@ class Go2WInverseDynamicsWbcNode(Node):
         if traction_state in {'STOP', 'INFEASIBLE'} and not mixed_escape:
             return traction_reason.upper() or 'EXCESSIVE_SLIP'
         if result.success:
-            normal_tolerance = qp_constraint_validation_tolerance(
-                QpConstraintViolation(category='minimum_normal_force'),
-                self.config, result.primal_residual,
+            constraint_tolerance = max(
+                0.010, 10.0 * self.config.solver_eps_abs,
             )
             normals = result.force_components[2::3]
             if np.any(
                 normals
-                < self.config.normal_force_min_n - normal_tolerance
+                < self.config.normal_force_min_n - constraint_tolerance
             ):
                 return 'NEGATIVE_NORMAL_FORCE'
-            friction_tolerance = qp_constraint_validation_tolerance(
-                QpConstraintViolation(category='longitudinal_friction'),
-                self.config, result.primal_residual,
+            friction_ratio_tolerance = constraint_tolerance / max(
+                min(
+                    self.config.friction_mu_longitudinal,
+                    self.config.friction_mu_lateral,
+                ) * self.config.normal_force_min_n,
+                1.0,
             )
-            for longitudinal, lateral, normal in np.asarray(
-                result.force_components
-            ).reshape(4, 3):
-                if (
-                    abs(longitudinal)
-                    > self.config.friction_mu_longitudinal * normal
-                    + friction_tolerance
-                    or abs(lateral)
-                    > self.config.friction_mu_lateral * normal
-                    + friction_tolerance
-                ):
-                    return 'FRICTION_CONE_VIOLATION'
-            torque_tolerance = qp_constraint_validation_tolerance(
-                QpConstraintViolation(category='actuator_torque'),
-                self.config, result.primal_residual,
-            )
-            torque_limits = np.asarray([
-                self.robot.effort_limits[index] * (
-                    self.config.wheel_torque_scale
-                    if name in WHEEL_JOINT_NAMES
-                    else self.config.leg_torque_scale
-                )
-                for index, name in enumerate(ACTUATED_JOINT_NAMES)
-            ])
-            if np.any(np.abs(result.tau) > torque_limits + torque_tolerance):
+            if friction_peak > 1.001 + friction_ratio_tolerance:
+                return 'FRICTION_CONE_VIOLATION'
+            if torque_utilization > 1.001:
                 return 'TORQUE_BOUND_VIOLATION'
         if self.run_start_ros_sec is not None:
             if now_ros - self.run_start_ros_sec > self.config.maximum_runtime_sec:
@@ -4851,20 +3056,8 @@ class Go2WInverseDynamicsWbcNode(Node):
         effective_speed: float,
         deadline_missed: bool,
     ) -> None:
-        roll, pitch, yaw = quaternion_to_rpy(state.base_quaternion)
+        roll, pitch, _ = quaternion_to_rpy(state.base_quaternion)
         slope_diagnostics = self.contacts.slope_diagnostics
-        orientation_error = orientation_error_body(
-            dynamics.base_rotation, target,
-        )
-        angular_acceleration_target = self.qp._orientation_angular_target(
-            dynamics.base_rotation, state.v[3:6], target,
-        )
-        violation = self.qp.last_constraint_violation
-        adapter = self.hybrid_adapter
-        ik_residuals = (
-            adapter.last_ik_contact_residuals
-            if adapter is not None else np.zeros(4)
-        )
         strings = {
             'state': self.state,
             'backend': (
@@ -4872,15 +3065,7 @@ class Go2WInverseDynamicsWbcNode(Node):
                 else f'{self.config.backend}:unavailable_shadow'
             ),
             'solver_status': result.status,
-            'qp_violation': (
-                'none' if violation.category == 'none'
-                else f'{violation.category}:{violation.name}'
-            ),
             'phase': terrain.contact_phase.value,
-            'ik_residual_state': (
-                adapter.last_ik_residual_state
-                if adapter else IK_RESIDUAL_NO_CORRECTION_NEEDED
-            ),
         }
         for name, value in strings.items():
             message = String()
@@ -4894,7 +3079,6 @@ class Go2WInverseDynamicsWbcNode(Node):
             'runtime': 1000.0 * result.runtime_sec,
             'objective': result.objective, 'primal': result.primal_residual,
             'dual': result.dual_residual,
-            'qp_violation_amount': max(0.0, violation.amount),
             'slope': max(terrain.fast_slope_deg, terrain.stable_slope_deg),
             'wheel_center_slope': slope_diagnostics.wheel_center_slope_deg,
             'pose_slope': slope_diagnostics.pose_slope_deg,
@@ -4902,82 +3086,14 @@ class Go2WInverseDynamicsWbcNode(Node):
             'front_local_slope': slope_diagnostics.front_local_slope_deg,
             'rear_local_slope': slope_diagnostics.rear_local_slope_deg,
             'roll': math.degrees(roll), 'pitch': math.degrees(pitch),
-            'yaw': math.degrees(yaw),
             'imu_pitch': math.degrees(pitch),
-            'roll_target': math.degrees(target.desired_roll_rad),
-            'pitch_target': math.degrees(target.desired_pitch_rad),
-            'yaw_target': math.degrees(target.desired_yaw_rad),
+            'pitch_target': math.degrees(target.feasible_pitch_rad),
             'long_margin': target.longitudinal_margin_m,
             'lat_margin': target.lateral_margin_m,
             'speed_requested': self.config.commanded_speed_mps,
             'speed_effective': effective_speed,
-            'ik_max_residual': float(np.max(ik_residuals)),
-            'ik_condition': (
-                adapter.last_ik_condition_number if adapter else 0.0
-            ),
-            'ik_limit_margin': (
-                adapter.last_ik_minimum_joint_limit_margin_rad
-                if adapter else 0.0
-            ),
-            'ik_authority': (
-                adapter.last_ik_authority_scale if adapter else 0.0
-            ),
-            'ik_selected_fraction': (
-                adapter.last_ik_selected_correction_fraction
-                if adapter else 0.0
-            ),
-            'ik_candidate_residual': (
-                adapter.last_ik_candidate_residual_m if adapter else 0.0
-            ),
-            'ik_final_residual': (
-                adapter.last_ik_final_command_residual_m if adapter else 0.0
-            ),
-            'ik_pitch_hip_ratio': (
-                adapter.last_ik_pitch_hip_to_sagittal_ratio
-                if adapter else 0.0
-            ),
-            'ik_axis_roll': (
-                adapter.last_ik_axis_fractions[0] if adapter else 0.0
-            ),
-            'ik_axis_pitch': (
-                adapter.last_ik_axis_fractions[1] if adapter else 0.0
-            ),
-            'ik_axis_yaw': (
-                adapter.last_ik_axis_fractions[2] if adapter else 0.0
-            ),
-            'ik_speed_scale': (
-                adapter.last_ik_speed_scale if adapter else 1.0
-            ),
-            'ik_pitch_requested': (
-                adapter.last_ik_pitch_requested_rad if adapter else 0.0
-            ),
-            'ik_pitch_fraction': (
-                adapter.last_ik_pitch_accepted_fraction if adapter else 0.0
-            ),
-            'ik_pitch_residual': (
-                adapter.last_ik_pitch_final_residual_m if adapter else 0.0
-            ),
-            'ik_pitch_hip': (
-                adapter.last_ik_pitch_max_hip_delta_rad if adapter else 0.0
-            ),
-            'ik_roll_requested': (
-                adapter.last_ik_roll_requested_rad if adapter else 0.0
-            ),
-            'ik_roll_fraction': (
-                adapter.last_ik_roll_accepted_fraction if adapter else 0.0
-            ),
-            'ik_roll_hip': (
-                adapter.last_ik_roll_max_hip_delta_rad if adapter else 0.0
-            ),
-            'ik_leg_yaw_requested': (
-                adapter.last_ik_leg_yaw_requested_rad if adapter else 0.0
-            ),
             **{f'friction_{leg}': friction[index] for index, leg in enumerate(LEGS)},
             **{f'slip_{leg}': slips[index] for index, leg in enumerate(LEGS)},
-            **{
-                f'ik_residual_{leg}': ik_residuals[index]
-                for index, leg in enumerate(LEGS)
-            },
         }
         for name, value in floats.items():
             if math.isfinite(float(value)):
@@ -4987,21 +3103,8 @@ class Go2WInverseDynamicsWbcNode(Node):
         iteration = UInt32()
         iteration.data = max(0, result.iterations)
         self.iteration_publisher.publish(iteration)
-        ik_iteration = UInt32()
-        ik_iteration.data = max(
-            0, adapter.last_ik_iterations if adapter else 0,
-        )
-        self.ik_iteration_publisher.publish(ik_iteration)
-        ik_rejections = UInt32()
-        ik_rejections.data = max(
-            0, adapter.ik_residual_rejection_count if adapter else 0,
-        )
-        self.ik_rejection_publisher.publish(ik_rejections)
         vectors = {
             'angular_velocity': state.base_angular_velocity_body,
-            'orientation_error': orientation_error,
-            'angular_acceleration_target': angular_acceleration_target,
-            'optimized_angular_acceleration': result.qdd[3:6],
             'com_position': dynamics.com_position,
             'com_velocity': dynamics.com_velocity,
             'com_desired_acceleration': target.desired_com_acceleration,
@@ -5030,14 +3133,6 @@ class Go2WInverseDynamicsWbcNode(Node):
         proposed.name = list(LEG_JOINT_NAMES)
         proposed.position = self.last_leg_command.tolist()
         self.proposed_joint_publisher.publish(proposed)
-        leveling = JointState()
-        leveling.header.stamp = stamp
-        leveling.name = list(LEG_JOINT_NAMES)
-        leveling.position = (
-            self.hybrid_adapter.last_leveling_correction.tolist()
-            if self.hybrid_adapter is not None else [0.0] * 12
-        )
-        self.leveling_joint_publisher.publish(leveling)
         wheels = Float64MultiArray()
         wheels.data = self.last_wheel_command.tolist()
         self.proposed_wheel_publisher.publish(wheels)
@@ -5057,100 +3152,6 @@ class Go2WInverseDynamicsWbcNode(Node):
             KeyValue(key='pose_source', value=state.pose_source),
             KeyValue(key='contact_phase', value=terrain.contact_phase.value),
             KeyValue(key='solver_status', value=result.status),
-            KeyValue(key='qp_violation_category', value=violation.category),
-            KeyValue(key='qp_violation_name', value=violation.name),
-            KeyValue(key='qp_violation_value', value=str(violation.value)),
-            KeyValue(key='qp_violation_bound', value=str(violation.bound)),
-            KeyValue(key='qp_violation_amount', value=str(violation.amount)),
-            KeyValue(
-                key='ik_max_contact_residual_m',
-                value=str(float(np.max(ik_residuals))),
-            ),
-            KeyValue(
-                key='ik_jacobian_condition',
-                value=str(adapter.last_ik_condition_number if adapter else 0.0),
-            ),
-            KeyValue(
-                key='ik_authority_scale',
-                value=str(adapter.last_ik_authority_scale if adapter else 0.0),
-            ),
-            KeyValue(
-                key='ik_residual_state',
-                value=(
-                    adapter.last_ik_residual_state
-                    if adapter else IK_RESIDUAL_NO_CORRECTION_NEEDED
-                ),
-            ),
-            KeyValue(
-                key='ik_correction_requested',
-                value=str(
-                    adapter.last_ik_correction_requested
-                    if adapter else False
-                ),
-            ),
-            KeyValue(
-                key='ik_consecutive_residual_failures',
-                value=str(
-                    adapter.consecutive_ik_residual_failures
-                    if adapter else 0
-                ),
-            ),
-            KeyValue(
-                key='ik_degraded_count',
-                value=str(adapter.ik_degraded_count if adapter else 0),
-            ),
-            KeyValue(
-                key='ik_selected_correction_fraction',
-                value=str(
-                    adapter.last_ik_selected_correction_fraction
-                    if adapter else 0.0
-                ),
-            ),
-            KeyValue(
-                key='ik_final_command_residual_m',
-                value=str(
-                    adapter.last_ik_final_command_residual_m
-                    if adapter else 0.0
-                ),
-            ),
-            KeyValue(
-                key='ik_speed_scale',
-                value=str(adapter.last_ik_speed_scale if adapter else 1.0),
-            ),
-            KeyValue(
-                key='ik_pitch_requested_rad',
-                value=str(
-                    adapter.last_ik_pitch_requested_rad if adapter else 0.0
-                ),
-            ),
-            KeyValue(
-                key='ik_pitch_accepted_fraction',
-                value=str(
-                    adapter.last_ik_pitch_accepted_fraction
-                    if adapter else 0.0
-                ),
-            ),
-            KeyValue(
-                key='ik_pitch_max_hip_delta_rad',
-                value=str(
-                    adapter.last_ik_pitch_max_hip_delta_rad
-                    if adapter else 0.0
-                ),
-            ),
-            KeyValue(
-                key='ik_roll_accepted_fraction',
-                value=str(
-                    adapter.last_ik_roll_accepted_fraction
-                    if adapter else 0.0
-                ),
-            ),
-            KeyValue(
-                key='leveling_solve_fallbacks',
-                value=str(
-                    self.hybrid_adapter.leveling_solve_fallbacks
-                    if self.hybrid_adapter is not None else 0
-                ),
-            ),
             KeyValue(key='run_id', value=self.logger.run_id),
         ]
         diagnostics.status = [status]
@@ -5166,48 +3167,12 @@ class Go2WInverseDynamicsWbcNode(Node):
         terrain: TerrainEstimate,
         slips: Sequence[float],
         friction: Sequence[float],
-        torque_utilization: float,
         effective_speed: float,
         timings: Mapping[str, float],
         deadline_missed: bool,
     ) -> None:
-        roll, pitch, yaw = quaternion_to_rpy(state.base_quaternion)
-        roll_error = target.desired_roll_rad - roll
-        pitch_error = target.desired_pitch_rad - pitch
-        yaw_error = wrap_to_pi(target.desired_yaw_rad - yaw)
+        roll, pitch, _ = quaternion_to_rpy(state.base_quaternion)
         slope_diagnostics = self.contacts.slope_diagnostics
-        orientation_error = orientation_error_body(
-            dynamics.base_rotation, target,
-        )
-        angular_acceleration_target = self.qp._orientation_angular_target(
-            dynamics.base_rotation, state.v[3:6], target,
-        )
-        wbc_joint_delta = (
-            self.hybrid_adapter.last_wbc_joint_delta
-            if self.hybrid_adapter is not None else np.zeros(12)
-        )
-        leveling_joint_delta = (
-            self.hybrid_adapter.last_leveling_correction
-            if self.hybrid_adapter is not None else np.zeros(12)
-        )
-        adapter = self.hybrid_adapter
-        measured_leg_positions = np.asarray([
-            state.q[self.robot.q_indices[name]] for name in LEG_JOINT_NAMES
-        ])
-        measured_leg_velocities = np.asarray([
-            state.v[self.robot.v_indices[name]] for name in LEG_JOINT_NAMES
-        ])
-        safe_lower = (
-            self.robot.position_lower + self.config.joint_limit_margin_rad
-        )
-        safe_upper = (
-            self.robot.position_upper - self.config.joint_limit_margin_rad
-        )
-        joint_limit_margins = np.minimum(
-            measured_leg_positions - safe_lower,
-            safe_upper - measured_leg_positions,
-        )
-        violation = self.qp.last_constraint_violation
         self.logger.write({
             'wall_time_utc': datetime.now(timezone.utc).isoformat(),
             'ros_time_sec': now_ros, 'state': self.state,
@@ -5240,172 +3205,11 @@ class Go2WInverseDynamicsWbcNode(Node):
             'com_position': dynamics.com_position,
             'com_velocity': dynamics.com_velocity,
             'desired_com_acceleration': target.desired_com_acceleration,
-            'orientation_error_body_rad': orientation_error,
-            'orientation_angular_target_radps2': (
-                angular_acceleration_target
-            ),
-            'leveling_orientation_correction_body_rad': (
-                adapter.last_leveling_orientation_body
-                if adapter is not None else np.zeros(3)
-            ),
-            'optimized_base_angular_qdd_radps2': result.qdd[3:6],
             'pitch_deg': math.degrees(pitch),
-            'pitch_target_deg': math.degrees(target.desired_pitch_rad),
-            'pitch_error_deg': math.degrees(pitch_error),
-            'roll_deg': math.degrees(roll),
-            'yaw_deg': math.degrees(yaw),
-            'roll_target_deg': math.degrees(target.desired_roll_rad),
-            'yaw_target_deg': math.degrees(target.desired_yaw_rad),
-            'roll_error_deg': math.degrees(roll_error),
-            'yaw_error_deg': math.degrees(yaw_error),
-            'q': state.q, 'v': state.v,
-            'qdd': result.qdd,
-            'measured_leg_positions': measured_leg_positions,
-            'measured_leg_velocities': measured_leg_velocities,
-            'joint_limit_margin_rad': joint_limit_margins,
-            'desired_torque': result.tau,
-            'torque_utilization': torque_utilization,
-            'wbc_joint_delta_rad': wbc_joint_delta,
-            'leveling_joint_delta_rad': leveling_joint_delta,
-            'ik_contact_residuals_m': (
-                adapter.last_ik_contact_residuals
-                if adapter is not None else np.zeros(4)
-            ),
-            'ik_max_contact_residual_m': (
-                float(np.max(adapter.last_ik_contact_residuals))
-                if adapter is not None else 0.0
-            ),
-            'ik_wheelbase_before_m': (
-                adapter.last_ik_wheelbase_before
-                if adapter is not None else np.zeros(2)
-            ),
-            'ik_wheelbase_after_m': (
-                adapter.last_ik_wheelbase_after
-                if adapter is not None else np.zeros(2)
-            ),
-            'ik_axle_width_before_m': (
-                adapter.last_ik_axle_width_before
-                if adapter is not None else np.zeros(2)
-            ),
-            'ik_axle_width_after_m': (
-                adapter.last_ik_axle_width_after
-                if adapter is not None else np.zeros(2)
-            ),
-            'ik_minimum_joint_limit_margin_rad': (
-                adapter.last_ik_minimum_joint_limit_margin_rad
-                if adapter is not None else 0.0
-            ),
-            'ik_jacobian_condition': (
-                adapter.last_ik_condition_number
-                if adapter is not None else 0.0
-            ),
-            'ik_minimum_singular_value': (
-                adapter.last_ik_minimum_singular_value
-                if adapter is not None else 0.0
-            ),
-            'ik_iterations': (
-                adapter.last_ik_iterations if adapter is not None else 0
-            ),
-            'ik_fallback_count': (
-                adapter.leveling_solve_fallbacks
-                if adapter is not None else 0
-            ),
-            'ik_authority_scale': (
-                adapter.last_ik_authority_scale
-                if adapter is not None else 0.0
-            ),
-            'ik_selected_correction_fraction': (
-                adapter.last_ik_selected_correction_fraction
-                if adapter is not None else 0.0
-            ),
-            'ik_candidate_residual_m': (
-                adapter.last_ik_candidate_residual_m
-                if adapter is not None else 0.0
-            ),
-            'ik_final_command_residual_m': (
-                adapter.last_ik_final_command_residual_m
-                if adapter is not None else 0.0
-            ),
-            'ik_residual_state': (
-                adapter.last_ik_residual_state
-                if adapter is not None else IK_RESIDUAL_NO_CORRECTION_NEEDED
-            ),
-            'ik_correction_requested': (
-                adapter.last_ik_correction_requested
-                if adapter is not None else False
-            ),
-            'ik_consecutive_residual_failures': (
-                adapter.consecutive_ik_residual_failures
-                if adapter is not None else 0
-            ),
-            'ik_residual_rejection_count': (
-                adapter.ik_residual_rejection_count
-                if adapter is not None else 0
-            ),
-            'ik_degraded_count': (
-                adapter.ik_degraded_count if adapter is not None else 0
-            ),
-            'ik_pitch_hip_to_sagittal_ratio': (
-                adapter.last_ik_pitch_hip_to_sagittal_ratio
-                if adapter is not None else 0.0
-            ),
-            'ik_axis_roll_fraction': (
-                adapter.last_ik_axis_fractions[0]
-                if adapter is not None else 0.0
-            ),
-            'ik_axis_pitch_fraction': (
-                adapter.last_ik_axis_fractions[1]
-                if adapter is not None else 0.0
-            ),
-            'ik_axis_yaw_fraction': (
-                adapter.last_ik_axis_fractions[2]
-                if adapter is not None else 0.0
-            ),
-            'ik_speed_scale': (
-                adapter.last_ik_speed_scale
-                if adapter is not None else 1.0
-            ),
-            'ik_pitch_requested_rad': (
-                adapter.last_ik_pitch_requested_rad
-                if adapter is not None else 0.0
-            ),
-            'ik_pitch_accepted_fraction': (
-                adapter.last_ik_pitch_accepted_fraction
-                if adapter is not None else 0.0
-            ),
-            'ik_pitch_final_residual_m': (
-                adapter.last_ik_pitch_final_residual_m
-                if adapter is not None else 0.0
-            ),
-            'ik_pitch_max_hip_delta_rad': (
-                adapter.last_ik_pitch_max_hip_delta_rad
-                if adapter is not None else 0.0
-            ),
-            'ik_roll_requested_rad': (
-                adapter.last_ik_roll_requested_rad
-                if adapter is not None else 0.0
-            ),
-            'ik_roll_accepted_fraction': (
-                adapter.last_ik_roll_accepted_fraction
-                if adapter is not None else 0.0
-            ),
-            'ik_roll_final_residual_m': (
-                adapter.last_ik_roll_final_residual_m
-                if adapter is not None else 0.0
-            ),
-            'ik_roll_max_hip_delta_rad': (
-                adapter.last_ik_roll_max_hip_delta_rad
-                if adapter is not None else 0.0
-            ),
-            'ik_leg_yaw_requested_rad': (
-                adapter.last_ik_leg_yaw_requested_rad
-                if adapter is not None else 0.0
-            ),
-            'ik_leg_yaw_accepted_fraction': (
-                adapter.last_ik_leg_yaw_accepted_fraction
-                if adapter is not None else 0.0
-            ),
-            'final_leg_position_command': self.last_leg_command,
+            'pitch_target_deg': math.degrees(target.feasible_pitch_rad),
+            'pitch_error_deg': math.degrees(target.feasible_pitch_rad - pitch),
+            'roll_deg': math.degrees(roll), 'q': state.q, 'v': state.v,
+            'qdd': result.qdd, 'desired_torque': result.tau,
             'published_leg_command': self.last_leg_command,
             'published_wheel_command': self.last_wheel_command,
             'contact_forces_world': result.world_forces,
@@ -5417,11 +3221,6 @@ class Go2WInverseDynamicsWbcNode(Node):
             'solver_objective': result.objective,
             'primal_residual': result.primal_residual,
             'dual_residual': result.dual_residual,
-            'qp_violation_category': violation.category,
-            'qp_violation_name': violation.name,
-            'qp_violation_value': violation.value,
-            'qp_violation_bound': violation.bound,
-            'qp_violation_amount': violation.amount,
             'longitudinal_margin_m': target.longitudinal_margin_m,
             'lateral_margin_m': target.lateral_margin_m,
             'requested_speed_mps': self.config.commanded_speed_mps,
@@ -5580,7 +3379,6 @@ class Go2WInverseDynamicsWbcNode(Node):
                 state, dynamics, frames, target, effective_speed, dt,
             )
             qp_ms = 1000.0 * (time.perf_counter() - qp_start)
-        self.logger.observe_solver_attempt(result)
         if self.effective_mode == 'monitor':
             qp_ms = 0.0
         if self.effective_mode == 'monitor':
@@ -5596,16 +3394,7 @@ class Go2WInverseDynamicsWbcNode(Node):
                 self.config.maximum_consecutive_solver_failures,
             )
             if fallback is None:
-                violation = self.qp.last_constraint_violation
-                detail = (
-                    f':{violation.category}:{violation.name}'
-                    f':value={violation.value:.6g}'
-                    f':bound={violation.bound:.6g}'
-                    if violation.category != 'none' else ''
-                )
-                self._fault(
-                    'WBC_SOLVER_FAULT:' + result.status + detail, 'FAULT',
-                )
+                self._fault('WBC_SOLVER_FAULT:' + result.status, 'FAULT')
                 return
             result = fallback
         friction, torque_utilization, friction_peak = self._solution_metrics(result)
@@ -5631,8 +3420,7 @@ class Go2WInverseDynamicsWbcNode(Node):
             return
         if self.stop_requested:
             effective_speed = 0.0
-            self._publish_safe_stop()
-        elif self.config.mode == 'active' and self.effective_mode == 'active':
+        if self.config.mode == 'active' and self.effective_mode == 'active':
             try:
                 if self.hybrid_adapter is not None:
                     if settling:
@@ -5646,17 +3434,8 @@ class Go2WInverseDynamicsWbcNode(Node):
                         self.hybrid_adapter.last_wheel_command[:] = 0.0
                     else:
                         command = self.hybrid_adapter.propose(
-                            state=state,
-                            result=result,
-                            effective_speed=effective_speed,
-                            dt=dt,
-                            dynamics=dynamics,
-                            contacts=frames,
-                            target=target,
+                            state, result, effective_speed, dt,
                         )
-                        if self.hybrid_adapter.persistent_ik_residual_failure():
-                            self._fault('HYBRID_IK_RESIDUAL', 'FAULT')
-                            return
                     self.last_leg_command = command.leg_positions
                     self.last_wheel_command = command.wheel_velocities
                     self.hybrid_adapter.publish(command)
@@ -5667,13 +3446,7 @@ class Go2WInverseDynamicsWbcNode(Node):
                 return
         elif self.hybrid_adapter is not None and self.effective_mode != 'monitor':
             command = self.hybrid_adapter.propose(
-                state=state,
-                result=result,
-                effective_speed=effective_speed,
-                dt=dt,
-                dynamics=dynamics,
-                contacts=frames,
-                target=target,
+                state, result, effective_speed, dt,
             )
             self.last_leg_command = command.leg_positions
             self.last_wheel_command = command.wheel_velocities
@@ -5715,45 +3488,27 @@ class Go2WInverseDynamicsWbcNode(Node):
         }
         self._log_cycle(
             now_ros, state, dynamics, target, result, terrain,
-            slips, friction, torque_utilization, effective_speed,
-            timings, deadline_missed,
+            slips, friction, effective_speed, timings, deadline_missed,
         )
-        roll, pitch, yaw = quaternion_to_rpy(state.base_quaternion)
+        roll, pitch, _ = quaternion_to_rpy(state.base_quaternion)
         self.logger.observe(
             result, math.degrees(pitch), math.degrees(roll),
             min(target.longitudinal_margin_m, target.lateral_margin_m),
             friction, slips, torque_utilization, deadline_missed,
         )
         if now_wall - self.last_status_wall >= self.config.status_period_sec:
-            adapter = self.hybrid_adapter
-            if adapter is not None:
-                ik_status = (
-                    f'pitch_req={math.degrees(adapter.last_ik_pitch_requested_rad):.2f}deg '
-                    f'roll_req={math.degrees(adapter.last_ik_roll_requested_rad):.2f}deg '
-                    f'pitch_frac={adapter.last_ik_pitch_accepted_fraction:.3f} '
-                    f'pitch_res={1000.0 * adapter.last_ik_pitch_final_residual_m:.1f}mm '
-                    f'pitch_hip={adapter.last_ik_pitch_max_hip_delta_rad:.4f}rad '
-                    f'roll_frac={adapter.last_ik_roll_accepted_fraction:.3f} '
-                    f'state={adapter.last_ik_residual_state} '
-                    f'ik_res={1000.0 * adapter.last_ik_final_command_residual_m:.1f}mm '
-                    f'ik_frac={adapter.last_ik_selected_correction_fraction:.3f} '
-                    f'fail_count={adapter.consecutive_ik_residual_failures} '
-                    f'reject_count={adapter.ik_residual_rejection_count} '
-                    f'ik_axis=('
-                    f'{adapter.last_ik_axis_fractions[0]:.2f}/'
-                    f'{adapter.last_ik_axis_fractions[1]:.2f}/'
-                    f'{adapter.last_ik_axis_fractions[2]:.2f}) '
-                    f'ik_speed={adapter.last_ik_speed_scale:.2f}'
-                )
-            else:
-                ik_status = (
-                    'pitch_req=0.00deg roll_req=0.00deg pitch_frac=0.000 '
-                    'pitch_res=0.0mm pitch_hip=0.0000rad roll_frac=0.000 '
-                    'state=NO_CORRECTION_NEEDED ik_res=0.0mm ik_frac=0.000 '
-                    'fail_count=0 reject_count=0 '
-                    'ik_axis=(0.00/0.00/0.00) ik_speed=1.00'
-                )
-            self.get_logger().info(ik_status)
+            slope_diagnostics = self.contacts.slope_diagnostics
+            self.get_logger().info(
+                f'state={self.state} phase={terrain.contact_phase.value} '
+                f'terrain_fused={slope_diagnostics.fused_slope_deg:.1f}deg '
+                f'terrain_front={slope_diagnostics.front_local_slope_deg:.1f}deg '
+                f'terrain_rear={slope_diagnostics.rear_local_slope_deg:.1f}deg '
+                f'wheel_center={slope_diagnostics.wheel_center_slope_deg:.1f}deg '
+                f'pose_slope={slope_diagnostics.pose_slope_deg:.1f}deg '
+                f'imu_pitch={math.degrees(pitch):.1f}deg '
+                f'speed={effective_speed:.3f}m/s margin={margin:.3f}m '
+                f'qp={result.status} {1000.0 * result.runtime_sec:.2f}ms'
+            )
             self.last_status_wall = now_wall
 
     def _publish_idle_diagnostics(self, readiness: str) -> None:
@@ -5767,16 +3522,10 @@ class Go2WInverseDynamicsWbcNode(Node):
         status.hardware_id = 'go2w'
         status.level = DiagnosticStatus.WARN
         status.message = self.backend_failure_reason or readiness or self.state
-        violation = self.qp.last_constraint_violation
         status.values = [
             KeyValue(key='mode', value=self.effective_mode),
             KeyValue(key='backend', value=self.config.backend),
             KeyValue(key='enabled', value='false'),
-            KeyValue(key='qp_violation_category', value=violation.category),
-            KeyValue(key='qp_violation_name', value=violation.name),
-            KeyValue(key='qp_violation_value', value=str(violation.value)),
-            KeyValue(key='qp_violation_bound', value=str(violation.bound)),
-            KeyValue(key='qp_violation_amount', value=str(violation.amount)),
         ]
         diagnostics.status = [status]
         self.diagnostics_publisher.publish(diagnostics)
@@ -5784,10 +3533,6 @@ class Go2WInverseDynamicsWbcNode(Node):
             'state': self.state,
             'backend': self.config.backend,
             'solver_status': 'DISABLED',
-            'qp_violation': (
-                'none' if violation.category == 'none'
-                else f'{violation.category}:{violation.name}'
-            ),
             'phase': self.contacts.terrain.contact_phase.value,
         }.items():
             message = String()
@@ -5814,7 +3559,6 @@ class Go2WInverseDynamicsWbcNode(Node):
             final_result,
             final_reason,
             self.interfaces.report(), top, no_topple, self.maximum_slope_seen,
-            self.qp.last_constraint_violation,
         )
         self.get_logger().info(
             f'final result={final_result} reason={final_reason} '
